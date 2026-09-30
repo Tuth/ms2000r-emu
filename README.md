@@ -1,4 +1,4 @@
-# ms2000r-emu
+# ms2000r-emu  (v0.9.0)
 
 A hardware-level emulator of the **KORG MS2000R** (rack version of the MS2000 analog-modeling synthesizer):
 the H8S/2350 main CPU runs the original firmware instruction by instruction, and the DSP56362 runs the
@@ -17,13 +17,26 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - VST3 (phase 2): the panel in the plugin window; the machine's state (knob positions, settings and the written
   flash sectors) is saved in the host project.
 
-Known limits: Windows only; one plugin instance per process; the plugin needs a host buffer of about 256 samples
-(128 is too little for now); at 96 kHz the plugin crackles; old hosts (VSTHost) can hang when leaving the demo
-songs. The emulator needs a recent CPU - it runs about 2x real time on a current desktop.
+Known limits: Windows only; one plugin instance per process; old hosts (VSTHost) can hang when leaving the demo
+songs. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
+96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
+Next: loading .syx files and a preset library page.
+
+## Download
+
+Windows builds are on the [Releases](../../releases) page: `ms2000_emulator.exe` with its two launchers and the
+`MS2000R.vst3` plugin. Put your ROM files (below) beside the exe, or in a folder above it, and start
+`MS2000R.bat` (or `MS2000R (log).bat` to get `ms2000_gui.log` for a bug report). Copy `MS2000R.vst3` to your
+VST3 folder (usually `C:\Program Files\Common Files\VST3`) and point `MS2K_HOME` at the folder with the ROMs,
+or keep the plugin in a folder below it. The Microsoft Visual C++ 2015-2022 x64 runtime is needed.
 
 ## What you need - NOT included
 
 This repository contains **no firmware, no ROM and no manual**. You need dumps from your own hardware:
+
+The working folder is found by itself: `MS2K_HOME` if set, else the current folder if it holds the two required ROMs,
+else the exe's (or the plugin's) folder or the first folder above it that holds them. Settings (`thin_gui.ini`), the
+machine's memory and `recordings\` are kept there.
 
 | file (in the working folder) | what | required |
 |---|---|---|
@@ -44,6 +57,8 @@ cmake -S . -B build -G "Visual Studio 17 2022"
 cmake --build build --config Release --target ms2000_emulator
 build\Release\ms2000_emulator.exe --gui
 ```
+
+`dist\MS2000R.bat` and `dist\MS2000R (log).bat` are the launchers to put beside the exe.
 
 VST3 plugin (JUCE is fetched at configure time):
 

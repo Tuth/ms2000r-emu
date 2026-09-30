@@ -37,7 +37,7 @@ juce::File findHome()
     }
     for (auto& c : cands) {
         juce::File d(c);
-        if (d.getChildFile("flash.bin").existsAsFile()) return d;
+        if (d.getChildFile("flash.bin").existsAsFile() && d.getChildFile("full FW").getChildFile("boot-362.ms2000.bin").existsAsFile()) return d;
     }
     return {};
 }

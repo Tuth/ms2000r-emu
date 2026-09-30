@@ -245,7 +245,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
     }
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, wndProc, 0, 0, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("MS2000Thin"), nullptr };
     RegisterClassEx(&wc);
-    HWND hwnd = CreateWindow(wc.lpszClassName, _T("MS2000 emulator - test GUI"), WS_OVERLAPPEDWINDOW, 30, 20, 1600, 1060, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindow(wc.lpszClassName, _T("MS2000R emulator v") MS2K_VERSION, WS_OVERLAPPEDWINDOW, 30, 20, 1600, 1060, nullptr, nullptr, wc.hInstance, nullptr);
     if (!createDevice(hwnd)) { cleanupDevice(); UnregisterClass(wc.lpszClassName, wc.hInstance); return -1; }
     createRT();
     ShowWindow(hwnd, SW_SHOWDEFAULT); UpdateWindow(hwnd);

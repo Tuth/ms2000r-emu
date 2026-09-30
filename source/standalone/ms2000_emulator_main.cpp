@@ -512,7 +512,38 @@ static int runSelftest(const std::string& romPath, const CliConfig& config) {
     }
 }
 
+// PUBLIC-1b (2026-10-01): the working folder is the MS2000 folder - the one holding flash.bin and
+// full FW\boot-362.ms2000.bin (the ROMs,
+// thin_gui.ini, the flash state and recordings\ all live there). MS2K_HOME, else the current folder if it
+// has flash.bin, else the exe's folder or the first folder above it that has. So a .bat beside the exe, a
+// shortcut or a double click all find the same place.
+#if defined(_WIN32) && !defined(_WINDOWS_)
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void* module, wchar_t* name, unsigned long size);
+#endif
+static void ms2kFindHome() {
+    namespace fs = std::filesystem;
+    auto ok = [](const fs::path& d) { std::error_code ec; return fs::exists(d / "flash.bin", ec) && fs::exists(d / "full FW" / "boot-362.ms2000.bin", ec); };
+    fs::path home;
+    if (const char* e = std::getenv("MS2K_HOME"); e && *e && ok(fs::path(e))) home = e;
+    else if (ok(fs::current_path())) return;
+#ifdef _WIN32
+    else {
+        // (not _get_wpgmptr: with a narrow main() it is unset and the CRT's invalid-parameter check ends the process)
+        wchar_t exe[1024] = {};
+        if (GetModuleFileNameW(nullptr, exe, 1024) > 0)
+            for (fs::path d = fs::path(exe).parent_path(); !d.empty(); d = d.parent_path()) {
+                if (ok(d)) { home = d; break; }
+                if (d == d.root_path()) break;
+            }
+    }
+#endif
+    if (home.empty()) return;
+    std::error_code ec; fs::current_path(home, ec);
+    std::cout << "[HOME] " << home.string() << std::endl;
+}
+
 int main(int argc, char** argv) {
+    ms2kFindHome();
     auto config = parseArgs(argc, argv);
     
     // Sprint 1.4: Set global cycle reporting flag

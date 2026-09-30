@@ -313,7 +313,7 @@ void Ms2kEditor::timerCallback()
         m_lcd = s;
     }
     if (m_tab == 1) {
-        const juce::String st = m_proc.status() + juce::String::formatted("\npanel draw %.1f ms", m_paintMs);
+        const juce::String st = juce::String("MS2000R v" MS2K_VERSION "\n") + m_proc.status() + juce::String::formatted("\npanel draw %.1f ms", m_paintMs);
         if (st != m_status.getText()) m_status.setText(st, juce::dontSendNotification);
     }
     if (changed) { m_dirty = false; repaint(); }
