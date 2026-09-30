@@ -323,11 +323,28 @@ extern "C" void ms2k_phase(const char*);
 // ENGINE-BLOCK: the body of one 1 ms tick, moved out of cpuThreadLoop unchanged (the thread and render() both
 // run exactly this). Returns false once the runner is stopped.
 bool Ms2kRunner::tick1ms() {
-    using clk = std::chrono::steady_clock;
     // 1 ms tick - exactly like test harness
     for (int i = 0; i < m_cfg.cpuCyclesPerTick && m_running; i++) {
         m_cpu->step();
     }
+    return tickHousekeeping();
+}
+
+// PERF-VST (2026-09-30): render() runs the machine in slices of steps instead of whole ticks. A "tick" is
+// cpuCyclesPerTick = 20,000 step() calls = ~8.7 ms of MCU time (measured: one render call in ~6.5 at
+// 96 kHz / 128 took 5.5 ms, the rest ~0 - the DSP's frames arrived 8.7 ms at a time). The step() sequence
+// and the housekeeping after every 20,000th step are the same as tick1ms()'s; only where render() may stop
+// (and inject MIDI) is finer.
+bool Ms2kRunner::runSteps(int n) {
+    while (n-- > 0 && m_running) {
+        m_cpu->step();
+        if (++m_tickPos >= m_cfg.cpuCyclesPerTick) { m_tickPos = 0; tickHousekeeping(); }
+    }
+    return m_running.load();
+}
+
+bool Ms2kRunner::tickHousekeeping() {
+    using clk = std::chrono::steady_clock;
     ms2k_phase("runner-tick");
     
     // Set timer tick flag (after at least some execution)
@@ -475,9 +492,18 @@ uint32_t Ms2kRunner::render(float* left, float* right, uint32_t frames, const Mi
         const uint32_t need = segEnd - done;
         if (d) {   // until the frames are there, but never past the MCU time they span (+ the tick that crosses it)
             const uint64_t limit = m_cpu->getCycles() + uint64_t(need) * m_cpu->getClockFrequency() / 48000u;
+            // PERF-VST diagnostic (R2, default OFF): MS2K_RENDERSTAT=1 prints calls that ran more than 2 ticks
+            static const bool rstat = [] { const char* e = std::getenv("MS2K_RENDERSTAT"); return e && *e == '1'; }();
+            const uint32_t fill0 = rstat ? d->audioFill() : 0; const uint64_t cyc0 = rstat ? m_cpu->getCycles() : 0; int ticks = 0;
             while (d->audioFill() < need && m_running) {
                 if (m_cpu->getCycles() >= limit) break;
-                tick1ms();
+                runSteps(kRenderSlice); ++ticks;
+            }
+            if (rstat && ticks > 8) {
+                static int shown = 0;
+                if (m_renderFrames > 48000u * 3u && shown++ < 40)
+                    printf("[RENDERSTAT] t=%.3f need %u fill %u -> %u, slices %d, MCU cycles %llu (limit %llu)\n", double(m_renderFrames) / 48000.0,
+                           need, fill0, d->audioFill(), ticks, (unsigned long long)(m_cpu->getCycles() - cyc0), (unsigned long long)(limit - cyc0));
             }
         }
         for (uint32_t k = 0; k < need; ++k, ++done) {
@@ -487,6 +513,7 @@ uint32_t Ms2kRunner::render(float* left, float* right, uint32_t frames, const Mi
             else { left[done] = 0.0f; right[done] = 0.0f; ++m_renderSilence; }
             if (fromDsp) fromDsp[done] = got ? 1 : 0;
         }
+        m_renderFrames += need;
     }
     while (ei < nEvents) { sendMIDIData(events[ei].data, events[ei].len); ++ei; }
     return frames;

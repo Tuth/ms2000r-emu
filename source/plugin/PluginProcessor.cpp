@@ -31,7 +31,7 @@ juce::File findHome()
     if (const char* e = std::getenv("MS2K_HOME"); e && *e) cands.add(e);
     cands.add(juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MS2000R").getFullPathName());
     // PUBLIC-1: the folders above the plugin binary (...\X\VST3\MS2000R.vst3\Contents\x86_64-win\MS2000R.vst3 -> X)
-    for (auto d = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory(); d.exists() && cands.size() < 10; d = d.getParentDirectory()) {
+    for (auto d = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory(); d.exists() && cands.size() < 16; d = d.getParentDirectory()) {
         cands.add(d.getFullPathName());
         if (d.isRoot()) break;
     }

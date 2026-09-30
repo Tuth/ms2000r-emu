@@ -123,6 +123,9 @@ public:
     bool startManual();
     uint32_t render(float* left, float* right, uint32_t frames, const MidiEv* events = nullptr, size_t nEvents = 0, uint8_t* fromDsp = nullptr);
     bool tick1ms();                  // one 1 ms tick of the machine: the CPU steps and the runner's per-tick work
+    bool runSteps(int n);          // PERF-VST: n step() calls, tick1ms housekeeping every cpuCyclesPerTick steps
+    bool tickHousekeeping();       // what tick1ms() does after its steps
+    static constexpr int kRenderSlice = 1000;   // render()'s slice: ~0.43 ms of MCU time
     uint64_t renderSilenceFrames() const { return m_renderSilence; }   // frames render() filled with silence (no DSP frame yet)
 
     // GUI can call (update potentiometers)
@@ -301,6 +304,8 @@ public:
     std::atomic<bool> m_running{false};
     bool m_manual = false, m_lcdReportPrinted = false;   // ENGINE-BLOCK
     uint64_t m_renderSilence = 0;
+    uint64_t m_renderFrames = 0;   // PERF-VST: frames render() has handed out
+    int      m_tickPos = 0;        // PERF-VST: steps into the current tick (runSteps)
     std::atomic<bool> m_ready{false};
     std::thread m_cpuThread, m_audioThread;
     

@@ -11,8 +11,11 @@
 //                 cycle); the note is played 5 s after that; the WAV / RMS show the machine came back.
 #include <JuceHeader.h>
 #include <iostream>
+#include <algorithm>
+#include <vector>
 
 namespace {
+std::vector<double> g_blockMs;   // PERF-VST: the time of every processBlock call
 std::unique_ptr<juce::AudioPluginInstance> load(juce::VST3PluginFormat& fmt, const juce::PluginDescription& d, double rate, int block)
 {
     juce::String err;
@@ -32,7 +35,9 @@ void play(juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& out, int fr
         juce::MidiBuffer midi;
         if (noteOn >= pos && noteOn < pos + n) midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), noteOn - pos);
         if (noteOff >= pos && noteOff < pos + n) midi.addEvent(juce::MidiMessage::noteOff(1, 60), noteOff - pos);
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
         inst.processBlock(buf, midi);
+        g_blockMs.push_back(juce::Time::getMillisecondCounterHiRes() - t0);
         for (const auto m : midi) { (void)m; ++midiOut; }
         for (int ch = 0; ch < 2; ++ch) out.copyFrom(ch, pos, buf, ch, 0, n);
     }
@@ -202,6 +207,17 @@ int main(int argc, char** argv)
         const int a = int(s * rate), n = int(rate);
         const float r = out.getRMSLevel(0, a, juce::jmin(n, total - a));
         std::cout << s << ":" << (r > 0 ? juce::roundToInt(20.0 * std::log10(r)) : -240) << " ";
+    }
+    if (!g_blockMs.empty()) {   // PERF-VST: per-block cost against the block's own duration
+        auto v = g_blockMs; std::sort(v.begin(), v.end());
+        const double dur = 1000.0 * block / rate;
+        size_t over = 0; for (double x : g_blockMs) over += x > dur;
+        auto q = [&](double f) { return v[std::min(v.size() - 1, size_t(f * double(v.size())))]; };
+        std::cout << "\nblocks " << v.size() << ", block " << dur << " ms: median " << q(0.5) << " p99 " << q(0.99) << " p99.9 " << q(0.999)
+                  << " max " << v.back() << " ms, over the block time " << over;
+        size_t overLate = 0; double maxLate = 0; const size_t skip = size_t(3.0 * rate / block);
+        for (size_t i = skip; i < g_blockMs.size(); ++i) { overLate += g_blockMs[i] > dur; maxLate = std::max(maxLate, g_blockMs[i]); }
+        std::cout << " (after the first 3 s: " << overLate << ", max " << maxLate << " ms)";
     }
     std::cout << "\nmidi out events " << midiOutEvents << ", " << secs << " s at " << rate << " Hz / " << block << " in " << wall << " s wall\n";
     return rc;
