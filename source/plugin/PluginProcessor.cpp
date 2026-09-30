@@ -58,6 +58,7 @@ Ms2kProcessor::Ms2kProcessor()
 {
     for (auto& m : knobs) for (auto& v : m) v = 512;     // every pot at its centre, as the standalone's default
     m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
+    m_syx.setClock([this] { return double(m_frames.load(std::memory_order_relaxed)) / (m_hostRate > 0 ? m_hostRate : 48000.0); });   // machine time
     startTimerHz(10);
 }
 
@@ -69,8 +70,9 @@ void Ms2kProcessor::timerCallback()
     static const char* imp = std::getenv("MS2K_SYXIMPORT");
     static const char* exp = std::getenv("MS2K_SYXEXPORT");
     if (!imp && !exp) return;
-    if (m_syxDiag == 0 && m_frames.load() > uint64_t(5.0 * m_hostRate)) { m_syxDiag = 1; if (imp) m_syx.startImport(imp); }
-    else if (m_syxDiag == 1 && !m_syx.busy()) { m_syxDiag = 2; if (imp) std::printf("[SYX] %s\n", m_syx.status().c_str()); if (exp) m_syx.startExport(exp); }
+    static uint64_t f0 = 0;
+    if (m_syxDiag == 0 && m_frames.load() > uint64_t(5.0 * m_hostRate)) { m_syxDiag = 1; f0 = m_frames.load(); if (imp) m_syx.startImport(imp); }
+    else if (m_syxDiag == 1 && !m_syx.busy()) { m_syxDiag = 2; if (imp) std::printf("[SYX] %s (machine time %.1f s)\n", m_syx.status().c_str(), double(m_frames.load() - f0) / m_hostRate); if (exp) m_syx.startExport(exp); }
     else if (m_syxDiag == 2 && !m_syx.busy()) { m_syxDiag = 3; if (exp) std::printf("[SYX] %s\n", m_syx.status().c_str()); std::fflush(stdout); }
 }
 

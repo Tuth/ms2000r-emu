@@ -28,6 +28,10 @@ class SyxTool {
 public:
     using Send = std::function<void(const uint8_t*, size_t)>;
     void setSend(Send s) { m_send = std::move(s); }
+    // SYX-1b: what the timeouts are measured in. Default the wall clock; the plugin gives the machine's own time
+    // (frames played / rate): a host that runs the plugin slower than real time, or not at all for a while
+    // (VSTHost: "No answer in time" for a bank the same plugin loads in 13.3 s machine time), must not time out.
+    void setClock(std::function<double()> c) { m_clock = std::move(c); }
 
     // a byte of the firmware's MIDI OUT (TDR1); only whole SysEx messages are kept
     void feed(uint8_t b)
@@ -122,7 +126,7 @@ public:
 private:
     enum Mode { Import, Export };
     enum St { Idle, Inquiry, WaitAck, WaitDump };
-    static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+    double now() const { return m_clock ? m_clock() : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
     static std::string baseName(const std::string& p) { const auto k = p.find_last_of("\\/"); return k == std::string::npos ? p : p.substr(k + 1); }
     void send(const std::vector<uint8_t>& m) { if (m_send) m_send(m.data(), m.size()); }
     void begin(Mode md)
@@ -137,17 +141,18 @@ private:
         auto m = m_msgs[m_next++];
         m[2] = uint8_t(0x30 | m_ch);
         m_expect = double(m.size()) * 10.0 / 31250.0;                // the line time
-        m_deadline = m_expect + 10.0; m_t0 = now(); m_st = WaitAck;
+        m_deadline = m_expect + 30.0; m_t0 = now(); m_st = WaitAck;
         send(m);
     }
     void requestBank()
     {
-        m_deadline = 30.0; m_t0 = now(); m_st = WaitDump;
+        m_deadline = 45.0; m_t0 = now(); m_st = WaitDump;
         send({ 0xF0, 0x42, uint8_t(0x30 | m_ch), 0x58, 0x1C, 0xF7 });
     }
     void finish(const std::string& s) { m_status = s; m_st = Idle; }
 
     Send m_send;
+    std::function<double()> m_clock;
     std::mutex m_mx;
     std::vector<uint8_t> m_cur; bool m_in = false;
     std::deque<std::vector<uint8_t>> m_rx;
