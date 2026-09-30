@@ -211,7 +211,7 @@ if(WIN32)
             source/gui/thin_gui.cpp
             source/audio/host_io_win.cpp
         )
-        target_link_libraries(ms2000_emulator imgui::imgui d3d11 dxgi)
+        target_link_libraries(ms2000_emulator imgui::imgui d3d11 dxgi comdlg32)
         target_compile_definitions(ms2000_emulator PRIVATE IMGUI_ENABLED)
         message(STATUS "MS2000 Emulator with ImGui GUI support will be built")
     else()

@@ -148,6 +148,22 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
     m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); };
     m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); };
+    m_syxLoad.onClick = [this] {
+        m_chooser = std::make_unique<juce::FileChooser>("Load a .syx into the MS2000R", juce::File(), "*.syx");
+        m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this](const juce::FileChooser& fc) {
+            const auto f = fc.getResult();
+            if (f.existsAsFile()) m_proc.syx().startImport(f.getFullPathName().toStdString());
+        });
+    };
+    m_syxSave.onClick = [this] {
+        m_chooser = std::make_unique<juce::FileChooser>("Save all 128 programs", juce::File(), "*.syx");
+        m_chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting, [this](const juce::FileChooser& fc) {
+            auto f = fc.getResult();
+            if (f == juce::File()) return;
+            if (!f.hasFileExtension("syx")) f = f.withFileExtension("syx");
+            m_proc.syx().startExport(f.getFullPathName().toStdString());
+        });
+    };
     m_demo.onClick = [this] { if (m_demoPhase == 0) { m_demoPhase = 1; m_demoT0 = juce::Time::getMillisecondCounter(); } };
     m_help.setText("Panel: drag a knob up / down (Shift = fine), mouse wheel, double-click = centre.\n"
                    "Shift+click a program key 1-16 or EXIT: it stays held (amber ring) - chords on the pads, or EXIT held while "
@@ -155,7 +171,8 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
                    "POWER / VOLUME is the plugin's output level; AUDIO IN 1 / 2 are the input level pots. The host routes "
                    "its input bus to AUDIO IN 1 (left) and 2 (right).", juce::dontSendNotification);
     m_help.setJustificationType(juce::Justification::topLeft);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_help, &m_status }) addChildComponent(*c);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_help, &m_status }) addChildComponent(*c);
+    m_syxStatus.setColour(juce::Label::textColourId, juce::Colour(236, 242, 244));
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_help, &m_status })
         c->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)), c->setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
 
@@ -189,7 +206,7 @@ void Ms2kEditor::showTab(int t)
     m_tab = t; m_proc.editorTab = t;
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_help, &m_status }) c->setVisible(t == 1);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_help, &m_status }) c->setVisible(t == 1);
     if (t == 1) { m_io.releaseAll(); m_mouse.active.clear(); }
     m_dirty = true; repaint();
 }
@@ -210,6 +227,9 @@ void Ms2kEditor::resized()
     m_dac20.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
     m_demo.setBounds(r.removeFromTop(30).withWidth(300));
+    r.removeFromTop(10);
+    { auto row = r.removeFromTop(30); m_syxLoad.setBounds(row.removeFromLeft(180)); row.removeFromLeft(10); m_syxSave.setBounds(row.removeFromLeft(260)); }
+    m_syxStatus.setBounds(r.removeFromTop(26));
     r.removeFromTop(16);
     m_help.setBounds(r.removeFromTop(110));
     m_status.setBounds(r.removeFromTop(48));
@@ -313,6 +333,8 @@ void Ms2kEditor::timerCallback()
         m_lcd = s;
     }
     if (m_tab == 1) {
+        const juce::String ss(m_proc.syx().status());
+        if (ss != m_syxStatus.getText()) m_syxStatus.setText(ss, juce::dontSendNotification);
         const juce::String st = juce::String("MS2000R v" MS2K_VERSION "\n") + m_proc.status() + juce::String::formatted("\npanel draw %.1f ms", m_paintMs);
         if (st != m_status.getText()) m_status.setText(st, juce::dontSendNotification);
     }

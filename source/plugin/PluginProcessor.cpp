@@ -49,10 +49,26 @@ Ms2kProcessor::Ms2kProcessor()
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
     for (auto& m : knobs) for (auto& v : m) v = 512;     // every pot at its centre, as the standalone's default
+    m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
+    startTimerHz(10);
+}
+
+// SYX-1: the .syx tool runs on the message thread. R2 diagnostics (default OFF): MS2K_SYXIMPORT=<file> loads it
+// once the machine has played 5 s, then MS2K_SYXEXPORT=<file> saves all programs; results on stdout.
+void Ms2kProcessor::timerCallback()
+{
+    m_syx.poll();
+    static const char* imp = std::getenv("MS2K_SYXIMPORT");
+    static const char* exp = std::getenv("MS2K_SYXEXPORT");
+    if (!imp && !exp) return;
+    if (m_syxDiag == 0 && m_frames.load() > uint64_t(5.0 * m_hostRate)) { m_syxDiag = 1; if (imp) m_syx.startImport(imp); }
+    else if (m_syxDiag == 1 && !m_syx.busy()) { m_syxDiag = 2; if (imp) std::printf("[SYX] %s\n", m_syx.status().c_str()); if (exp) m_syx.startExport(exp); }
+    else if (m_syxDiag == 2 && !m_syx.busy()) { m_syxDiag = 3; if (exp) std::printf("[SYX] %s\n", m_syx.status().c_str()); std::fflush(stdout); }
 }
 
 Ms2kProcessor::~Ms2kProcessor()
 {
+    stopTimer();
     stopMachine();
     if (m_owner) g_machineTaken = false;
 }
@@ -141,6 +157,7 @@ bool Ms2kProcessor::startMachine()
     m_runner->getEmulator().setMidiOutSink([this](uint8_t b) {
         auto* d = m_runner ? m_runner->getEmulator().dsp() : nullptr;
         m_outBytes.push_back({ d ? d->txFrames() : 0, b });   // called on the audio thread, inside render()
+        m_syx.feed(b);
     });
     applyPanel();
     const uint32_t fm = m_runner->getEmulator().getFlashROM().stateMask();
@@ -241,6 +258,7 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     m_srcL.erase(m_srcL.begin(), m_srcL.begin() + ptrdiff_t(used));
     m_srcR.erase(m_srcR.begin(), m_srcR.begin() + ptrdiff_t(used));
     for (int ch = 2; ch < buffer.getNumChannels(); ++ch) buffer.clear(ch, 0, N);
+    m_frames.fetch_add(uint64_t(N), std::memory_order_relaxed);
     const float g = m_gain.load(std::memory_order_relaxed);   // POWER/VOLUME
     if (g != 1.0f) for (int ch = 0; ch < juce::jmin(2, buffer.getNumChannels()); ++ch) buffer.applyGain(ch, 0, N, g);
 

@@ -8,8 +8,9 @@
 #include <atomic>
 #include <mutex>
 #include "core/ms2000_runner.h"
+#include "core/syx_tool.h"
 
-class Ms2kProcessor : public juce::AudioProcessor
+class Ms2kProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     Ms2kProcessor();
@@ -52,8 +53,13 @@ public:
     void applyInputStage();
     void applyDac();
     void applyVolume() { m_gain.store(volume, std::memory_order_relaxed); }
+    MS2000::SyxTool& syx() { return m_syx; }   // SYX-1: .syx import / program export through the machine's MIDI
 
 private:
+    void timerCallback() override;           // SYX-1: drives m_syx (message thread)
+    MS2000::SyxTool m_syx;
+    std::atomic<uint64_t> m_frames{ 0 };      // host frames played since the machine started
+    int m_syxDiag = 0;
     bool bootMachine();                      // once, on the first prepareToPlay
     bool startMachine();                     // the power-on itself (boot and reboot)
     void stopMachine();

@@ -18,6 +18,8 @@
 #include "../core/dsp56362_emulator.h"
 #include "../core/lcd_gui.h"
 #include "vector_panel_imgui.h"
+#include "../core/syx_tool.h"
+#include <commdlg.h>
 #include <cmath>
 #include <algorithm>
 #include "../audio/host_io_win.h"
@@ -337,7 +339,10 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         std::thread th;
     };
     static MidiOutClock moc;
+    static MS2000::SyxTool syx;   // SYX-1: .syx import / program export through the machine's own MIDI
+    syx.setSend([&runner](const uint8_t* p, size_t n) { runner.sendMIDIData(p, n); });
     runner.getEmulator().setMidiOutSink([&midiOut, dsp](uint8_t b) {
+        syx.feed(b);
         if (dsp && moc.on.load(std::memory_order_acquire)) { LARGE_INTEGER t; QueryPerformanceCounter(&t); std::lock_guard<std::mutex> l(moc.mx); moc.q.push_back({ dsp->txFrames(), b, t.QuadPart }); }
         else midiOut.byte(b);
     });
@@ -787,6 +792,24 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         else {
             char lbl[64]; snprintf(lbl, sizeof lbl, "Stop recording (%.1f s)###recbtn", rec.seconds());
             if (ImGui::Button(lbl)) rec.stop();
+        }
+        {   // SYX-1: a .syx into the machine's MIDI IN / all 128 programs out of it (Windows file dialogs)
+            auto dlg = [&](bool saving, std::string& out) {
+                char file[MAX_PATH] = {};
+                OPENFILENAMEA ofn{}; ofn.lStructSize = sizeof ofn; ofn.hwndOwner = hwnd;
+                ofn.lpstrFilter = "SysEx (*.syx)\0*.syx\0All files\0*.*\0"; ofn.lpstrFile = file; ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrDefExt = "syx";
+                ofn.Flags = OFN_NOCHANGEDIR | (saving ? OFN_OVERWRITEPROMPT : (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST));
+                if (!(saving ? GetSaveFileNameA(&ofn) : GetOpenFileNameA(&ofn))) return false;
+                out = file; return true;
+            };
+            ImGui::SameLine();
+            std::string f;
+            if (ImGui::Button("Load .syx") && !syx.busy() && dlg(false, f)) syx.startImport(f);
+            ImGui::SameLine();
+            if (ImGui::Button("Save programs .syx") && !syx.busy() && dlg(true, f)) syx.startExport(f);
+            syx.poll();
+            if (!syx.status().empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", syx.status().c_str()); }
         }
         if (demoAt > 0 && GetTickCount64() >= demoAt && demoPhase == 0) { demoAt = 0; demoPhase = 1; demoT0 = GetTickCount64(); }
         if (demoPhase) {

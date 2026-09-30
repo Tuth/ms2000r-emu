@@ -7,6 +7,7 @@
 //                 message loop runs (with MS2K_EDITORSHOT set the editor saves its own pixels).
 //   mode "knobs0" (VST3-2): the folder's machine with all 32 pots at 0 (phase 1 never set them) - an A/B.
 //   mode "noin"   (VST3-2): the input bus disabled - an A/B for the Audio In path.
+//   mode "syx"    (SYX-1): plays with the message loop running, so MS2K_SYXIMPORT / MS2K_SYXEXPORT work.
 //   mode "reboot" (VST3-2): 1 s in, a state with a different flash is set while the machine runs (a power
 //                 cycle); the note is played 5 s after that; the WAV / RMS show the machine came back.
 #include <JuceHeader.h>
@@ -16,6 +17,7 @@
 
 namespace {
 std::vector<double> g_blockMs;   // PERF-VST: the time of every processBlock call
+bool g_pump = false;             // SYX-1: run the message loop while playing (the plugin's timers)
 std::unique_ptr<juce::AudioPluginInstance> load(juce::VST3PluginFormat& fmt, const juce::PluginDescription& d, double rate, int block)
 {
     juce::String err;
@@ -38,6 +40,7 @@ void play(juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& out, int fr
         const double t0 = juce::Time::getMillisecondCounterHiRes();
         inst.processBlock(buf, midi);
         g_blockMs.push_back(juce::Time::getMillisecondCounterHiRes() - t0);
+        if (g_pump && ((pos / block) % 8) == 0) juce::MessageManager::getInstance()->runDispatchLoopUntil(1);
         for (const auto m : midi) { (void)m; ++midiOut; }
         for (int ch = 0; ch < 2; ++ch) out.copyFrom(ch, pos, buf, ch, 0, n);
     }
@@ -151,6 +154,7 @@ int main(int argc, char** argv)
         std::cout << "knobs all 0, " << flashOf(t) << "\n";
     }
 
+    if (mode == "syx") g_pump = true;   // SYX-1: MS2K_SYXIMPORT / MS2K_SYXEXPORT act from the plugin's timer
     const int total = int(secs * rate);
     juce::AudioBuffer<float> out(2, juce::jmax(1, total));
     out.clear();

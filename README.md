@@ -14,13 +14,16 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - Front panel: all 32 knobs, the switch matrix, the LED matrix (as the firmware multiplexes it) and the 16x2 LCD
   including its custom characters. Shift+click on a program key 1-16 or EXIT keeps it held (chords, EXIT+GLOBAL).
 - Audio In 1/2 (vocoder, OSC1 AUDIO IN) through a model of the input stage and the AK4522 codec.
+- .syx: load a bank or program file into the machine and save all 128 programs as .syx (standalone: the buttons
+  under the panel; plugin: Settings). The file goes into the emulated MIDI IN and the firmware itself stores it,
+  as the real unit does from an editor; its DATA LOAD COMPLETED / ERROR answer is shown.
 - VST3 (phase 2): the panel in the plugin window; the machine's state (knob positions, settings and the written
   flash sectors) is saved in the host project.
 
 Known limits: Windows only; one plugin instance per process; old hosts (VSTHost) can hang when leaving the demo
 songs. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
 96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
-Next: loading .syx files and a preset library page.
+Next: a preset library page.
 
 ## Download
 
