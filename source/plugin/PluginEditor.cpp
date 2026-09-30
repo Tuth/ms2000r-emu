@@ -164,6 +164,13 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
             m_proc.syx().startExport(f.getFullPathName().toStdString());
         });
     };
+    m_homeBtn.onClick = [this] {
+        m_chooser = std::make_unique<juce::FileChooser>("The folder with flash.bin and full FW\\boot-362.ms2000.bin", juce::File(m_proc.homePath()));
+        m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this](const juce::FileChooser& fc) {
+            const auto d = fc.getResult();
+            if (d.isDirectory()) { m_proc.chooseHome(d); m_dirty = true; }
+        });
+    };
     m_demo.onClick = [this] { if (m_demoPhase == 0) { m_demoPhase = 1; m_demoT0 = juce::Time::getMillisecondCounter(); } };
     m_help.setText("Panel: drag a knob up / down (Shift = fine), mouse wheel, double-click = centre.\n"
                    "Shift+click a program key 1-16 or EXIT: it stays held (amber ring) - chords on the pads, or EXIT held while "
@@ -171,7 +178,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
                    "POWER / VOLUME is the plugin's output level; AUDIO IN 1 / 2 are the input level pots. The host routes "
                    "its input bus to AUDIO IN 1 (left) and 2 (right).", juce::dontSendNotification);
     m_help.setJustificationType(juce::Justification::topLeft);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_help, &m_status }) addChildComponent(*c);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) addChildComponent(*c);
     m_syxStatus.setColour(juce::Label::textColourId, juce::Colour(236, 242, 244));
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_help, &m_status })
         c->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)), c->setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
@@ -206,7 +213,7 @@ void Ms2kEditor::showTab(int t)
     m_tab = t; m_proc.editorTab = t;
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_help, &m_status }) c->setVisible(t == 1);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t == 1) { m_io.releaseAll(); m_mouse.active.clear(); }
     m_dirty = true; repaint();
 }
@@ -230,6 +237,8 @@ void Ms2kEditor::resized()
     r.removeFromTop(10);
     { auto row = r.removeFromTop(30); m_syxLoad.setBounds(row.removeFromLeft(180)); row.removeFromLeft(10); m_syxSave.setBounds(row.removeFromLeft(260)); }
     m_syxStatus.setBounds(r.removeFromTop(26));
+    r.removeFromTop(6);
+    m_homeBtn.setBounds(r.removeFromTop(30).withWidth(300));
     r.removeFromTop(16);
     m_help.setBounds(r.removeFromTop(110));
     m_status.setBounds(r.removeFromTop(48));
@@ -398,6 +407,13 @@ void Ms2kEditor::paint(juce::Graphics& g)
         const juce::Rectangle<float> r(m_mouse.pos.x + 14.0f, m_mouse.pos.y + 16.0f, w, 20.0f);
         g.setColour(juce::Colour(20, 22, 26).withAlpha(0.92f)); g.fillRoundedRectangle(r, 3.0f);
         g.setColour(juce::Colour(236, 242, 244)); g.setFont(f); g.drawText(be.tip, r, juce::Justification::centred, false);
+    }
+    if (!m_proc.runner()) {   // HOME-1: not powered on - say why and where to fix it, over the panel
+        const auto box = pa.withSizeKeepingCentre(pa.getWidth() * 0.62f, pa.getHeight() * 0.22f);
+        g.setColour(juce::Colour(20, 22, 26).withAlpha(0.92f)); g.fillRoundedRectangle(box, 8.0f);
+        g.setColour(juce::Colour(236, 242, 244)); g.setFont(juce::Font(juce::jmax(13.0f, pa.getHeight() * 0.024f)));
+        g.drawFittedText(m_proc.status() + "\n\nSettings -> \"Choose the MS2000 folder...\" (the folder with flash.bin and full FW\\boot-362.ms2000.bin).",
+                         box.reduced(18.0f).toNearestInt(), juce::Justification::centred, 6);
     }
     m_paintMs = juce::Time::getMillisecondCounterHiRes() - t0;
 }

@@ -64,6 +64,7 @@ private:
     juce::TextButton m_demo{ "Demo songs  (EXIT + GLOBAL)" };
     juce::TextButton m_syxLoad{ "Load .syx..." }, m_syxSave{ "Save all programs as .syx..." };
     juce::Label m_syxStatus;
+    juce::TextButton m_homeBtn{ "Choose the MS2000 folder..." };
     std::unique_ptr<juce::FileChooser> m_chooser;
     juce::Label m_help, m_status;
 

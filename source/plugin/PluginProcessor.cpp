@@ -25,10 +25,18 @@
 namespace {
 std::atomic<bool> g_machineTaken{ false };
 
+bool validHome(const juce::File& d)
+{
+    return d.getChildFile("flash.bin").existsAsFile() && d.getChildFile("full FW").getChildFile("boot-362.ms2000.bin").existsAsFile();
+}
+// HOME-1 (2026-10-01): the folder picked in Settings, kept for every instance and project
+juce::File homeSetting() { return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("MS2000R").getChildFile("home.txt"); }
+
 juce::File findHome()
 {
     juce::StringArray cands;
     if (const char* e = std::getenv("MS2K_HOME"); e && *e) cands.add(e);
+    if (homeSetting().existsAsFile()) cands.add(homeSetting().loadFileAsString().trim());
     cands.add(juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MS2000R").getFullPathName());
     // PUBLIC-1: the folders above the plugin binary (...\X\VST3\MS2000R.vst3\Contents\x86_64-win\MS2000R.vst3 -> X)
     for (auto d = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory(); d.exists() && cands.size() < 16; d = d.getParentDirectory()) {
@@ -37,7 +45,7 @@ juce::File findHome()
     }
     for (auto& c : cands) {
         juce::File d(c);
-        if (d.getChildFile("flash.bin").existsAsFile() && d.getChildFile("full FW").getChildFile("boot-362.ms2000.bin").existsAsFile()) return d;
+        if (validHome(d)) return d;
     }
     return {};
 }
@@ -125,9 +133,28 @@ bool Ms2kProcessor::bootMachine()
     m_owner = true;
     m_home = findHome();
     if (m_home == juce::File()) {
-        setStatus("flash.bin not found (MS2K_HOME, Documents\\MS2000R or a folder above the plugin).");
+        setStatus("The MS2000 folder (flash.bin + full FW\\boot-362.ms2000.bin) was not found - Settings: Choose the MS2000 folder.");
         return false;
     }
+    m_home.setAsCurrentWorkingDirectory();
+    if (!std::getenv("MS2K_MODEL")) _putenv_s("MS2K_MODEL", "R");
+    return startMachine();
+}
+
+// HOME-1: the folder chosen in Settings - saved for every instance; powers the machine on if it is not running yet
+bool Ms2kProcessor::chooseHome(const juce::File& d)
+{
+    if (!validHome(d)) { setStatus("No flash.bin + full FW\\boot-362.ms2000.bin in " + d.getFullPathName()); return false; }
+    homeSetting().getParentDirectory().createDirectory();
+    homeSetting().replaceWithText(d.getFullPathName());
+    if (m_runner) { setStatus("Saved: " + d.getFullPathName() + " - used from the next start"); return true; }
+    if (!m_bootTried) { setStatus("Saved: " + d.getFullPathName()); return true; }   // prepareToPlay boots from it
+    if (!m_owner) {
+        if (g_machineTaken.exchange(true)) { setStatus("Only one MS2000R can run in a process."); return false; }
+        m_owner = true;
+    }
+    std::lock_guard<std::mutex> l(m_machineMx);
+    m_home = d;
     m_home.setAsCurrentWorkingDirectory();
     if (!std::getenv("MS2K_MODEL")) _putenv_s("MS2K_MODEL", "R");
     return startMachine();

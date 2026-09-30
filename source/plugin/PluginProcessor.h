@@ -53,7 +53,9 @@ public:
     void applyInputStage();
     void applyDac();
     void applyVolume() { m_gain.store(volume, std::memory_order_relaxed); }
-    MS2000::SyxTool& syx() { return m_syx; }   // SYX-1: .syx import / program export through the machine's MIDI
+    MS2000::SyxTool& syx() { return m_syx; }
+    bool chooseHome(const juce::File& dir);     // HOME-1: Settings' folder choice
+    juce::String homePath() const { return m_home.getFullPathName(); }   // SYX-1: .syx import / program export through the machine's MIDI
 
 private:
     void timerCallback() override;           // SYX-1: drives m_syx (message thread)
