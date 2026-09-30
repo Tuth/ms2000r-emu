@@ -1,0 +1,49 @@
+diff --git a/source/dsp56kEmu/shi.cpp b/source/dsp56kEmu/shi.cpp
+index 83083ca5..d8947c3d 100644
+--- a/source/dsp56kEmu/shi.cpp
++++ b/source/dsp56kEmu/shi.cpp
+@@ -73,7 +73,11 @@ namespace dsp56k
+ 		case HRX:
+ 			{
+ 				if(!m_rxCount)
+-					return 0;	// reading an empty FIFO returns undefined data, zero is as good as anything
++				{
++					++m_hrxEmpty;
++					return 0;
++				}
++				++m_hrxReads;	// reading an empty FIFO returns undefined data, zero is as good as anything
+ 
+ 				const auto res = m_rx[0];
+ 
+@@ -176,6 +180,7 @@ namespace dsp56k
+ 		else
+ 		{
+ 			m_rx[m_rxCount++] = _fromPeer;
++			if(m_rxCount > m_rxMaxFill) m_rxMaxFill = m_rxCount;
+ 			updateStatus();
+ 			injectReceiveInterrupt();
+ 		}
+diff --git a/source/dsp56kEmu/shi.h b/source/dsp56kEmu/shi.h
+index 55aeb263..c2f63254 100644
+--- a/source/dsp56kEmu/shi.h
++++ b/source/dsp56kEmu/shi.h
+@@ -93,6 +93,11 @@ namespace dsp56k
+ 		// The word the next transfer shifts out. A peer that moves a word a byte at
+ 		// a time needs it when the transfer starts, not when exchange() ends it.
+ 		TWord peekTx() const						{ return m_htx; }
++		// MS2000 VOCODER-1 diagnostics (read-only counters): HRX reads by the DSP, reads of an empty FIFO, deepest fill
++		uint64_t hrxReads() const					{ return m_hrxReads; }
++		uint64_t hrxEmptyReads() const				{ return m_hrxEmpty; }
++		uint32_t rxMaxFill() const					{ return m_rxMaxFill; }
++		uint32_t rxCount() const					{ return m_rxCount; }
+ 
+ 		void setCallbackTx(CallbackTx&& _cb)		{ m_callbackTx = std::move(_cb); }
+ 
+@@ -112,6 +117,7 @@ namespace dsp56k
+ 
+ 		std::array<TWord, FifoSizeLarge> m_rx{};
+ 		uint32_t m_rxCount = 0;
++		uint64_t m_hrxReads = 0, m_hrxEmpty = 0; uint32_t m_rxMaxFill = 0;
+ 
+ 		CallbackTx m_callbackTx;
+ 	};

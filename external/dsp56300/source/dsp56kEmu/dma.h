@@ -1,0 +1,257 @@
+#pragma once
+
+#include <array>
+#include <vector>
+
+#include "types.h"
+
+namespace dsp56k
+{
+	class Dma;
+	class IPeripherals;
+
+	class DmaChannel
+	{
+	public:
+		enum DcrBits
+		{
+			Dss0, Dss1,								// DMA Source Space
+			Dds0, Dds1,								// DMA Destination Space
+			Dam0, Dam1, Dam2, Dam3, Dam4, Dam5,		// DMA Address Mode
+			D3d,									// Three-Dimensional Mode
+			Drs0, Drs1, Drs2, Drs3, Drs4,			// DMA Request Source
+			Dcon,									// DMA Continuous Mode Enable
+			Dpr0, Dpr1,								// DMA Channel Priority
+			Dtm0, Dtm1, Dtm2,						// DMA Transfer Mode
+			Die,									// DMA Interrupt Enable
+			De										// DMA Channel Enable
+		};
+
+		enum class AddressGenMode
+		{
+			DualCounterDOR0,
+			DualCounterDOR1,
+			DualCounterDOR2,
+			DualCounterDOR3,
+			SingleCounterAnoUpdate,
+			SingleCounterApostInc,
+			reserved110,
+			reserved111
+		};
+
+		enum class CounterType
+		{
+			CounterA,
+			CounterB,
+			CounterC,
+			CounterD,
+			CounterE
+		};
+
+		enum class RequestSource
+		{
+			ExternalIRQA          = 0b00000, // External (IRQA pin)
+			ExternalIRQB          = 0b00001, // External (IRQB pin)
+			ExternalIRQC          = 0b00010, // External (IRQC pin)
+			ExternalIRQD          = 0b00011, // External (IRQD pin)
+			DMAChannel0           = 0b00100, // Transfer done from DMA channel 0
+			DMAChannel1           = 0b00101, // Transfer done from DMA channel 1
+			DMAChannel2           = 0b00110, // Transfer done from DMA channel 2
+			DMAChannel3           = 0b00111, // Transfer done from DMA channel 3
+			DMAChannel4           = 0b01000, // Transfer done from DMA channel 4
+			DMAChannel5           = 0b01001, // Transfer done from DMA channel 5
+
+			// DSP56362
+			DaxTransmitData       = 0b01010, // DAX transmit data
+			EsaiReceiveData       = 0b01011, // ESAI receive data (RDF=1)
+			EsaiTransmitData      = 0b01100, // ESAI transmit data (TDE=1)
+			ShiHtxEmpty           = 0b01101, // SHI HTX empty
+			ShiFifoNotEmpty       = 0b01110, // SHI FIFO not empty
+			ShiFifoFull           = 0b01111, // SHI FIFO full
+			HostReceiveData       = 0b10000, // Host receive data
+			HostTransmitData      = 0b10001, // Host transmit data
+			Timer0                = 0b10010, // TIMER0 (TCF=1)
+			Timer1                = 0b10011, // TIMER1 (TCF=1)
+			Timer2                = 0b10100, // TIMER2 (TCF=1)
+			Dsp56362Reserved      = 0b10101,
+
+			// DSP56367, which has a second ESAI (DSP56367UM table 6-7)
+			Esai1ReceiveData      = 0b10101, // ESAI_1 receive data (RDF=1)
+			Esai1TransmitData     = 0b10110, // ESAI_1 transmit data (TDE=1)
+
+			// DSP56303
+			Essi0ReceiveData      = 0b01010, // ESSI0 receive data (RDF0 = 1)
+			Essi0TransmitData     = 0b01011, // ESSI0 transmit data (TDE0 = 1))
+			Essi1ReceiveData      = 0b01100, // ESSI1 receive data (RDF1 = 1)
+			Essi1TransmitData     = 0b01101, // ESSI1 transmit data (TDE1 = 1))
+			Hi08ReceiveDataFull   = 0b10011, // Host receive data full (HRDF = 1)
+			Hi08TransmitDataEmpty = 0b10100, // Host transmit data empty (HTDE = 1)
+			Dsp56303Reserved      = 0b10101,
+
+			// DRS is a five bit field that firmware fills in, so every one of its 32 values has to index
+			// the target array. Firmware for a 56367 board arms channels on the two ESAI_1 sources, which
+			// are past the last source a 56362 defines - and the array was sized by that, so the request
+			// list for them was built outside it and corrupted the heap.
+			Count = 0b100000
+		};
+
+		static_assert(RequestSource::Dsp56362Reserved == RequestSource::Dsp56303Reserved, "the two derivatives share the reserved slot");
+
+		enum class TransferMode
+		{
+			BlockTriggerRequestClearDE,		// Mode = Block, Trigger = Request, Clear DE = yes
+			WordTriggerRequestClearDE,		// Mode = Word, Trigger = Request, Clear DE = yes
+			LineTriggerRequestClearDE,		// Mode = Line, Trigger = Request, Clear DE = yes
+			BlockTriggerDEClearDE,			// Mode = Block, Trigger = DE, Clear DE = yes
+			BlockTriggerRequest,			// Mode = Block, Trigger = Request, Clear DE = no
+			WordTriggerRequest,				// Mode = Word, Trigger = Request, Clear DE = no
+		};
+
+		DmaChannel(Dma& _dma, IPeripherals& _peripherals, TWord _index);
+
+		void setDSR(TWord _address);
+		void setDDR(TWord _address);
+		void setDCO(TWord _count);
+		void setDCR(TWord _controlRegister);
+
+		const TWord& getDSR() const;
+		const TWord& getDDR() const;
+		const TWord& getDCO() const;
+		const TWord& getDCR() const;
+
+		// a DE triggered transfer that has not completed yet
+		bool hasPendingTransfer() const { return m_pendingTransfer > 0; }
+		TWord getIndex() const { return m_index; }
+
+		uint32_t exec();
+
+		void triggerByRequest();
+		void reset();	// MS2000 DSP-RESET: registers and state as after a hardware reset
+		uint64_t coreClock() const;
+
+		TransferMode getTransferMode() const;
+		TWord getPriority() const;
+		RequestSource getRequestSource() const;
+		TWord getAddressMode() const;
+		EMemArea getSourceSpace() const;
+		EMemArea getDestinationSpace() const;
+		bool isRequestTrigger() const;
+		bool isDEClearedAfterTransfer() const;
+		AddressGenMode getSourceAddressGenMode() const;
+		AddressGenMode getDestinationAddressGenMode() const;
+		TWord getDAM() const;
+
+		static EMemArea convertMemArea(TWord _space);
+
+		bool isPeripheralAddr(EMemArea _area, TWord _first, TWord _count) const;
+		bool isPeripheralAddr(EMemArea _area, TWord _addr) const;
+
+		bool bridgedOverlap(EMemArea _area, TWord _first, TWord _count) const;
+
+		void extractDCOHML(TWord& _h, TWord& _m, TWord& _l) const;
+
+	private:
+		void arm();
+
+		void memCopy(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
+		void memFill(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
+		void memCopyToFixedDest(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
+
+		bool dualModeIncrement(TWord& _dst, TWord _dor);
+
+		TWord memRead(EMemArea _area, TWord _addr) const;
+		void memWrite(EMemArea _area, TWord _addr, TWord _value) const;
+
+		TWord* getMemPtr(EMemArea _area, TWord _addr) const;
+
+		bool execTransfer();
+		void finishTransfer();
+
+		const TWord m_index;
+
+		Dma& m_dma;
+		IPeripherals& m_peripherals;
+
+		TWord m_dsr = 0;
+		TWord m_ddr = 0;
+		TWord m_dco = 0;
+		TWord m_dcr = 0;
+		bool m_dsrWritten = false;
+		bool m_ddrWritten = false;
+		bool m_armed = false;
+
+		TWord m_dcoh = 0;
+		TWord m_dcom = 0;
+		TWord m_dcol = 0;
+
+		TWord m_dcohInit = 0;
+		TWord m_dcomInit = 0;
+		TWord m_dcolInit = 0;
+
+		int32_t m_pendingTransfer = 0;
+		bool m_dataTransferred = false;
+		uint64_t m_lastClock = 0;
+
+		// MS2000 VOCODER-1: a request-triggered block completes (DE, DTD, interrupt) after its word transfers, in core
+		// clock cycles, not at the trigger (DSP56300FM rev.5 10.2/10.2.1, RENDERED p.185-186)
+		mutable uint32_t m_words = 0;		// words moved by the transfer in progress
+		uint64_t m_doneAtCycle = 0;
+		bool m_requestDelay = false;
+	};
+
+	class Dma
+	{
+	public:
+		enum DstrBits
+		{
+			Dtd0, Dtd1, Dtd2, Dtd3, Dtd4, Dtd5,		// DMA Transfer Done
+			DstrUnusedBit6, DstrUnusedBit7,
+			Dact,									// DMA Active
+			Dch0, Dch1, Dch2,						// DMA Active Channel
+
+			DchMask = (1<<Dch0) | (1<<Dch1) | (1<<Dch2)
+		};
+
+		using ChannelList = std::vector<DmaChannel*>;
+
+		Dma(IPeripherals& _peripherals);
+
+//		void setDSTR(TWord _value);
+		const TWord& getDSTR() const;
+		void reset();	// MS2000 DSP-RESET: every channel idle, DCR/DSR/DDR/DCO/DOR = 0, DTD set, no request targets
+		// the DMA data path is free from this core cycle on; a value set before the core's cycle count went back (a reset) is stale
+		uint64_t getEngineFreeAt(const uint64_t _now) const { return _now < m_engineSetAt ? _now : m_engineFreeAt; }
+		void setEngineFreeAt(const uint64_t _c, const uint64_t _now) { m_engineFreeAt = _c; m_engineSetAt = _now; }
+
+		void setDOR(TWord _index, TWord _value);
+		TWord getDOR(TWord _index) const;
+
+		void setDSR(const TWord _channel, const TWord _address) { m_channels[_channel].setDSR(_address); }
+		void setDDR(const TWord _channel, const TWord _address) { m_channels[_channel].setDDR(_address); }
+		void setDCO(const TWord _channel, const TWord _count) { m_channels[_channel].setDCO(_count); }
+		void setDCR(const TWord _channel, const TWord _controlRegister) { m_channels[_channel].setDCR(_controlRegister); }
+
+		const TWord& getDSR(const TWord _channel) const { return m_channels[_channel].getDSR(); }
+		const TWord& getDDR(const TWord _channel) const { return m_channels[_channel].getDDR(); }
+		const TWord& getDCO(const TWord _channel) const { return m_channels[_channel].getDCO(); }
+		const TWord& getDCR(const TWord _channel) const { return m_channels[_channel].getDCR(); }
+
+		uint32_t exec() noexcept;
+		void setActiveChannel(TWord _channel);
+		void clearActiveChannel();
+
+
+		bool hasTrigger(DmaChannel::RequestSource _source) const;
+		bool trigger(DmaChannel::RequestSource _source) const;
+		void addTriggerTarget(DmaChannel* _channel);
+		void removeTriggerTarget(const DmaChannel* _channel);
+
+	private:
+		TWord m_dstr;
+		std::array<DmaChannel, 6> m_channels;
+		std::array<TWord, 4> m_dor{};
+		uint64_t m_engineSetAt = 0;
+		uint64_t m_engineFreeAt = 0;	// VOCODER-1: the one DMA data path is busy until this core cycle (FM 10.2.1)
+		std::array<ChannelList, static_cast<uint32_t>(DmaChannel::RequestSource::Count)> m_requestTargets;
+	};
+}

@@ -1,0 +1,92 @@
+diff --git a/source/dsp56kEmu/esai.cpp b/source/dsp56kEmu/esai.cpp
+index ff461c30..d8fd757e 100644
+--- a/source/dsp56kEmu/esai.cpp
++++ b/source/dsp56kEmu/esai.cpp
+@@ -79,9 +79,23 @@ namespace dsp56k
+ 
+ 		const auto slotActive = isTxSlotActive(m_txSlotCounter);
+ 
++		// DSP56362UM rev.3 8.3.6.13 (RENDERED p.181, printed 8-37): TEDE - the transmit data
++		// registers became empty for an EVEN time slot: the words written in answer are the ones
++		// that go out in the even slot. Read that way because three independent readings agree
++		// (MS2000, 2026-09-26): the board's frame start is LRCK low = the AK4522's LEFT word
++		// (TCCR TFSP=1, UM p.156; AK4522 DIF1=DIF0=H = I2S, datasheet p.10, KOD-A30413); the
++		// firmware's RX even handler stores RX0 at Y:$6A next to its TX even source Y:$6C; and
++		// Panpot CC#10 = L63 lands in Y:$6C. With the other reading the machine would send its
++		// left channel in the right word.
++		const bool evenSlot = ((m_txSlotCounter + 1) & 1) == 0 || (m_txSlotCounter + 1) > getTxWordCount();
++
+ 		// note that this transfers the data in TX that has been written to it before
+ 		if(slotActive)
++		{
+ 			writeSlotToFrame();
++			if(evenSlot)	m_sr.set(M_TEDE);
++			else			m_sr.clear(M_TEDE);
++		}
+ 
+ 		if (0 == m_txSlotCounter)
+ 			m_sr.set(M_TFS);
+@@ -106,12 +120,22 @@ namespace dsp56k
+ 		if(!slotActive)
+ 			return;
+ 
++		// UM 8.4.3 (RENDERED p.189-190, printed 8-45/8-46), priority order: exception, then
++		// "ESAI Transmit Even Data ... TEDIE=1 ... the slot is an even slot (TEDE=1), and no
++		// exception", then "ESAI Transmit Data ... and no even slot interrupt has occurred
++		// (TEDE=0 or TEDIE=0)". The even-slot request was never raised, so firmware that fills
++		// its two slots from two vectors (MS2000: $3A -> Y:$6C.., $38 -> Y:$67..) sent the same
++		// channel twice.
+ 		if (m_sr.test(M_TUE) && m_tcr.test(M_TEIE))
+ 		{
+ 			injectInterrupt(Vba_ESAI_Transmit_Data_with_Exception_Status);
+ 
+ 			m_sr.clear(M_TUE);
+ 		}
++		else if (m_sr.test(M_TEDE) && m_tcr.test(M_TEDIE))
++		{
++			injectInterrupt(Vba_ESAI_Transmit_Even_Data);
++		}
+ 		else if (m_tcr.test(M_TIE))
+ 		{
+ 			injectInterrupt(Vba_ESAI_Transmit_Data);
+@@ -128,7 +152,12 @@ namespace dsp56k
+ 		const auto slotActive = isRxSlotActive(m_rxSlotCounter);
+ 
+ 		if(slotActive)
++		{
+ 			readSlotFromFrame();
++			// UM 8.3.6.8: REDF = the data arrived during an even time slot.
++			if((m_rxSlotCounter & 1) == 0)	m_sr.set(M_REDF);
++			else							m_sr.clear(M_REDF);
++		}
+ 
+ 		if (0 == m_rxSlotCounter)
+ 			m_sr.set(M_RFS);
+@@ -142,6 +171,10 @@ namespace dsp56k
+ 				injectInterrupt(Vba_ESAI_Receive_Data_With_Exception_Status);
+ 				m_sr.clear(M_ROE);
+ 			}
++			else if (m_sr.test(M_REDF) && m_rcr.test(M_REDIE))
++			{
++				injectInterrupt(Vba_ESAI_Receive_Even_Data);		// UM 8.4.3 item 2, before item 3
++			}
+ 			else if (m_rcr.test(M_RIE))
+ 			{
+ 				injectInterrupt(Vba_ESAI_Receive_Data);
+@@ -269,7 +302,7 @@ namespace dsp56k
+ 		{
+ //			if (m_hasReadStatus)
+ 				m_sr.clear(M_TUE);
+-			m_sr.clear(M_TDE);
++			m_sr.clear(M_TDE, M_TEDE);
+ 		}
+ 	}
+ 
+@@ -283,6 +316,7 @@ namespace dsp56k
+ 		if(!m_readRX)
+ 		{
+ 			m_sr.clear(M_RDF, M_ROE);
++			m_sr.clear(M_REDF);
+ 		}
+ 
+ 		return m_rx[_index];

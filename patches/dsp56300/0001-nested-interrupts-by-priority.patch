@@ -1,0 +1,226 @@
+diff --git a/source/dsp56kEmu/dsp.cpp b/source/dsp56kEmu/dsp.cpp
+index 5f023c01..8eaa2886 100644
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -158,6 +158,12 @@ namespace dsp56k
+ 
+ 	void DSP::execInterrupts()
+ 	{
++		if(m_interruptPriorityFunc)
++		{
++			execInterruptsByPriority();
++			return;
++		}
++
+ 		const auto interrupt = m_pendingInterrupts.front();
+ 
+ 		if(interrupt >= Vba_End)
+@@ -215,6 +221,9 @@ namespace dsp56k
+ 			else
+ 			{
+ 				m_jit.checkModeChange();
++
++				if(m_interruptPriorityFunc)
++					onLongInterruptFormed(vba);
+ 			}
+ 		}
+ 		else
+@@ -260,6 +269,9 @@ namespace dsp56k
+ 
+ 				m_processingMode = LongInterrupt;
+ 				m_interruptFunc = &dspExecNop;
++
++				if(m_interruptPriorityFunc)
++					onLongInterruptFormed(vba);
+ 			}
+ 			else
+ 			{
+@@ -270,6 +282,113 @@ namespace dsp56k
+ 		}
+ 	}
+ 
++	void DSP::execInterruptsByPriority()
++	{
++		// Serve the pending request with the highest level that the SR mask permits, and among those the
++		// lowest rank. See setInterruptPriorityFunc. Custom interrupts are emulator callbacks, not DSP
++		// interrupts: they go first, as they do without a priority function.
++		const auto mask = static_cast<int>(mr().var & 3);
++		const size_t count = m_pendingInterrupts.size();
++
++		size_t best = count;
++		InterruptPriority bestPrio;
++		bool anyDisabled = false;
++
++		for(size_t i=0; i<count; ++i)
++		{
++			const TWord vba = m_pendingInterrupts[i];
++
++			if(vba >= Vba_End)
++			{
++				best = i;
++				bestPrio.level = 4;
++				break;
++			}
++
++			const auto p = m_interruptPriorityFunc(vba);
++
++			if(p.level < 0)
++			{
++				anyDisabled = true;
++				continue;	// disabled, dropped below
++			}
++			if(p.level < 3 && p.level < mask)
++				continue;	// masked, stays pending
++
++			if(best == count || p.level > bestPrio.level || (p.level == bestPrio.level && p.rank < bestPrio.rank))
++			{
++				best = i;
++				bestPrio = p;
++			}
++		}
++
++		// A request from a source whose level is "disabled" in IPRC/IPRP is not an interrupt. Drop it,
++		// keeping the order of the others: compact towards the back, then pop the front.
++		if(anyDisabled)
++		{
++			size_t w = count;
++			for(size_t i=count; i-- > 0;)
++			{
++				const TWord vba = m_pendingInterrupts[i];
++				if(vba < Vba_End && m_interruptPriorityFunc(vba).level < 0)
++					continue;
++				--w;
++				m_pendingInterrupts[w] = vba;
++				if(i == best)
++					best = w;		// the chosen one is never a disabled one
++			}
++			for(size_t i=0; i<w; ++i)
++				m_pendingInterrupts.pop_front();
++			best = (best == count) ? m_pendingInterrupts.size() : best - w;
++		}
++
++		if(best >= m_pendingInterrupts.size())
++		{
++			// Nothing may be taken now. The requests wait, and the peripherals keep their clock meanwhile.
++			if(m_pendingInterrupts.empty())
++				m_interruptFunc = m_execPeripheralsFunc;
++			m_execPeripheralsFunc(this);
++			return;
++		}
++
++		// move the chosen request to the front, the others keep their order
++		const TWord vba = m_pendingInterrupts[best];
++		for(size_t i=best; i>0; --i)
++			m_pendingInterrupts[i] = m_pendingInterrupts[i-1];
++		m_pendingInterrupts[0] = vba;
++
++		if(vba >= Vba_End)
++		{
++			m_customInterrupts[vba - Vba_End]();
++
++			m_processingMode = Default;
++			m_pendingInterrupts.pop_front();
++			m_interruptFunc = m_pendingInterrupts.empty() ? m_execPeripheralsFunc : &dspExecInterrupts;
++			return;
++		}
++
++		m_processingMode = FastInterrupt;
++		m_pendingInterrupts.pop_front();
++
++		execInterrupt(vba);
++	}
++
++	void DSP::onLongInterruptFormed(const TWord _vba)
++	{
++		// FM 2-14: the JSR of a long interrupt stacks PC and SR (done by the JSR itself) and updates the mask
++		// to hold off the same and lower levels. Table 5-1: I = n permits n..3, so level L gives I = L+1, and
++		// level 3 cannot be masked (I = 3).
++		const auto level = std::max(0, std::min(3, m_interruptPriorityFunc(_vba).level));
++		const auto newMask = static_cast<TWord>(std::min(level + 1, 3));
++
++		reg.sr.var = (reg.sr.var & ~static_cast<TWord>(0x300)) | (newMask << 8);
++
++		// The routine is ordinary code from here on, guarded by the mask - interrupts of a higher level may
++		// nest into it and the peripherals keep running.
++		m_processingMode = Default;
++		m_interruptFunc = m_pendingInterrupts.empty() ? m_execPeripheralsFunc : &dspExecInterrupts;
++	}
++
+ 	void DSP::execDefaultPreventInterrupt()
+ 	{
+ 		m_processingMode = Default;
+@@ -1294,6 +1413,11 @@ namespace dsp56k
+ 
+ 	bool DSP::injectInterrupt(uint32_t _interruptVectorAddress)
+ 	{
++		// With priorities, a request can wait behind the mask. A source has one request line, so a second
++		// request of a source that is already waiting is the same request.
++		if(m_interruptPriorityFunc && _interruptVectorAddress < Vba_End && hasPendingInterrupt(_interruptVectorAddress))
++			return true;
++
+ 		m_pendingInterrupts.push_back({_interruptVectorAddress});
+ 
+ 		if(m_interruptFunc == m_execPeripheralsFunc)
+@@ -1317,6 +1441,16 @@ namespace dsp56k
+ 
+ 	bool DSP::isInterruptMasked(const TWord _vba) const
+ 	{
++		if(m_interruptPriorityFunc)
++		{
++			const auto level = m_interruptPriorityFunc(_vba).level;
++			if(level < 0)
++				return true;
++			if(level >= 3)
++				return false;
++			return level < static_cast<int>(mr().var & 0x3);
++		}
++
+ 		const auto prio = _vba < Vba_IRQA ? 3 : 2;
+ 		const auto minPrio = mr().var & 0x3;
+ 
+diff --git a/source/dsp56kEmu/dsp.h b/source/dsp56kEmu/dsp.h
+index e53ecd45..24fe8e24 100644
+--- a/source/dsp56kEmu/dsp.h
++++ b/source/dsp56kEmu/dsp.h
+@@ -120,6 +120,41 @@ namespace dsp56k
+ 
+ 		std::vector<std::function<void()>>			m_customInterrupts;
+ 
++	public:
++		/*	Nested interrupts by priority level. Opt-in - without it the behaviour is unchanged.
++
++			DSP56300 Family Manual rev. 5, section 2.3.2 (page 2-14): during the JSR that forms a long
++			interrupt "the PC and SR are stacked. The interrupt mask bits of the SR are updated to mask
++			interrupts of the same or lower priority", and "the interrupt service routine can be
++			interrupted (that is, nested interrupts are supported), but can only be interrupted by a
++			higher priority interrupt". Table 5-1 (page 5-14): I1:I0 = n permits IPL n..3, and IPL 3 is
++			always permitted.
++
++			Without this the emulator runs a long interrupt as one unit: no other interrupt and no
++			peripheral clock until its RTI. Firmware that does its whole per-sample job in a long
++			interrupt at a low level and expects a higher level ESAI interrupt to nest into it loses
++			ESAI slots for as long as the job runs.
++
++			The priority of a source is device and register specific (IPRC/IPRP), so the owner of the
++			DSP supplies it: level -1 = disabled, 0..3 = IPL. rank orders sources of the same level,
++			lower first (the "Interrupt Sources Priorities Within an IPL" table of the device).
++		*/
++		struct InterruptPriority
++		{
++			int level = -1;
++			int rank = 0;
++		};
++		using TInterruptPriorityFunc = std::function<InterruptPriority(TWord _vba)>;
++
++		void setInterruptPriorityFunc(TInterruptPriorityFunc&& _func) { m_interruptPriorityFunc = std::move(_func); }
++		bool hasInterruptPriorityFunc() const { return static_cast<bool>(m_interruptPriorityFunc); }
++
++	private:
++		void execInterruptsByPriority();
++		void onLongInterruptFormed(TWord _vba);
++
++		TInterruptPriorityFunc						m_interruptPriorityFunc;
++
+ 		Opcodes							m_opcodes;
+ 
+ 		struct OpcodeCacheEntry

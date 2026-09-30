@@ -1,0 +1,1552 @@
+#pragma once
+
+#include <atomic>
+
+#include "disasm.h"
+#include "dspconfig.h"
+#include "dspregs.h"
+#include "registers.h"
+#include "memory.h"
+#include "utils.h"
+#include "instructioncache.h"
+#include "opcodes.h"
+#include "jit.h"
+#include "jittypes.h"
+
+#if 0
+#	define LOGJITPC(PC)		LOG(HEX(reinterpret_cast<uint64_t>(this)) << " exec @ " << HEX(PC))
+#else
+#	define LOGJITPC(PC)		{}
+#endif
+
+namespace dsp56k
+{
+	class Memory;
+	class InterpreterUnitTests;
+	class JitUnittests;
+	class UnitTests;
+	class JitDspRegs;
+	class JitOps;
+	class AotRuntime;
+	class DebuggerInterface;
+	class DSP;
+	class IExternalBusDevice;
+	
+	using TInstructionFunc = void (DSP::*)(TWord _op);
+	
+	template<typename Ta, typename Tb> void dspExecPeripherals(DSP* _dsp) noexcept;
+
+	static constexpr bool g_useJIT = g_jitSupported;
+
+	class DSP final
+	{
+		friend class InterpreterUnitTests;
+		friend class JitUnittests;
+		friend class JitOptimizerTests;
+		friend class UnitTests;
+		friend class JitDspRegs;
+		friend class JitOps;
+		friend class Jit;
+		friend class AotRuntime;
+		friend class DebuggerInterface;
+
+		// _____________________________________________________________________________
+		// types
+		//
+	public:
+		using SRegs = DspRegs;
+
+		struct CCRCache
+		{
+			bool ab;
+			TReg56 alu;
+			uint32_t dirty;
+		};
+
+		enum ProcessingMode
+		{
+			Default,
+			DefaultPreventInterrupt,	// The only purpose of this state is to give time to regular processing if the emulation is so slow that interrupts are constantly processed, leaving no room for regular processing
+			FastInterrupt,
+			LongInterrupt,
+		};
+
+		enum TraceMode
+		{
+			Disabled	= 0,
+
+			Ops			= 0x01,
+			Regs		= 0x02,
+			StackIndent	= 0x04,
+		};
+
+		typedef void (*TInterruptFunc)(DSP*) noexcept;
+
+		static constexpr uint32_t PeripheralsProcessingStepSize = 32;
+
+	private:
+		// _____________________________________________________________________________
+		// members
+		//
+		Memory&							mem;
+		std::array<IPeripherals* const, 2>	perif;
+		IExternalBusDevice*					m_externalBusDevice = nullptr;
+		
+		TWord							pcCurrentInstruction = 0;
+		TWord							m_srCurrentInstruction = 0;
+		TWord							m_opWordB = 0;
+		uint32_t						m_currentOpLen = 0;
+
+		// set by terminate(), polled by the interpreter DO loop so that it can be left on shutdown
+		std::atomic<bool>				m_terminate{false};
+
+		TInterruptFunc					m_execPeripheralsFunc;
+
+		// these members are accessed via JIT asm code, keep them tightly together
+		Jit								m_jit;
+		SRegs							reg;							// this is the base pointer that is used to access all surrounding members
+		uint64_t						m_instructions = 0;
+		uint64_t						m_cycles = 0;
+		ProcessingMode					m_processingMode = Default;
+		TInterruptFunc					m_interruptFunc;
+
+		const TJitFunc*					m_jitEntries = nullptr;
+		CCRCache						ccrCache;
+
+		// The lock-free ring buffer's counters are now atomic (release/acquire), so it is correct on ARM too -
+		// the old #ifdef HAVE_ARM64 workaround that forced the blocking (Lock=true) variant here is gone.
+		RingBuffer<TWord, 1024, false>				m_pendingInterrupts;	// TODO: array is way too large
+		RingBuffer<TWord, 32, false>				m_pendingExternalInterrupts;
+
+		std::vector<std::function<void()>>			m_customInterrupts;
+
+	public:
+		/*	Nested interrupts by priority level. Opt-in - without it the behaviour is unchanged.
+
+			DSP56300 Family Manual rev. 5, section 2.3.2 (page 2-14): during the JSR that forms a long
+			interrupt "the PC and SR are stacked. The interrupt mask bits of the SR are updated to mask
+			interrupts of the same or lower priority", and "the interrupt service routine can be
+			interrupted (that is, nested interrupts are supported), but can only be interrupted by a
+			higher priority interrupt". Table 5-1 (page 5-14): I1:I0 = n permits IPL n..3, and IPL 3 is
+			always permitted.
+
+			Without this the emulator runs a long interrupt as one unit: no other interrupt and no
+			peripheral clock until its RTI. Firmware that does its whole per-sample job in a long
+			interrupt at a low level and expects a higher level ESAI interrupt to nest into it loses
+			ESAI slots for as long as the job runs.
+
+			The priority of a source is device and register specific (IPRC/IPRP), so the owner of the
+			DSP supplies it: level -1 = disabled, 0..3 = IPL. rank orders sources of the same level,
+			lower first (the "Interrupt Sources Priorities Within an IPL" table of the device).
+		*/
+		struct InterruptPriority
+		{
+			int level = -1;
+			int rank = 0;
+		};
+		using TInterruptPriorityFunc = std::function<InterruptPriority(TWord _vba)>;
+
+		void setInterruptPriorityFunc(TInterruptPriorityFunc&& _func) { m_interruptPriorityFunc = std::move(_func); }
+		bool hasInterruptPriorityFunc() const { return static_cast<bool>(m_interruptPriorityFunc); }
+
+	private:
+		void execInterruptsByPriority();
+		void onLongInterruptFormed(TWord _vba);
+
+		TInterruptPriorityFunc						m_interruptPriorityFunc;
+
+		Opcodes							m_opcodes;
+
+		struct OpcodeCacheEntry
+		{
+			TInstructionFunc op;
+			TInstructionFunc opMove;
+			TInstructionFunc opAlu;
+		};
+
+		std::vector<OpcodeCacheEntry>	m_opcodeCache;
+
+		// Per-PC instruction cycle count, filled lazily in interpreter builds. JIT builds leave
+		// this vector empty because they account cycles per compiled block. 0 = not yet computed.
+		std::vector<uint8_t>			m_opcodeCycleCache;
+		
+		InstructionCache				cache;
+
+		// used to monitor ALL register changes during exec
+		struct SRegChange
+		{
+			EReg			reg;
+			TReg24			valOld;
+			TReg24			valNew;
+			unsigned int	pc;
+			unsigned int	ictr;
+		};
+
+		std::vector<SRegChange>		m_regChanges;
+
+		// used to compare registers
+		struct SRegState
+		{
+			int64_t	val;
+		};
+
+		std::array<SRegState,Reg_COUNT>	m_prevRegStates;
+
+		TraceMode m_trace = Disabled;
+
+		std::string		m_asm;
+		Disassembler	m_disasm;
+
+		DebuggerInterface*	m_debugger = nullptr;
+
+		// _____________________________________________________________________________
+		// implementation
+		//
+	public:
+				DSP								( Memory& _memory, IPeripherals* _pX, IPeripherals* _pY );
+
+		void 	resetHW							();
+		void 	resetSW							();
+
+		void	jsr								(const TReg24& _val);
+		void	jsr								( const TWord _val )						{ jsr(TReg24(_val)); }
+
+		void 	setPC							( const TWord _val )						{ setPC(TReg24(_val)); }
+		void 	setPC							( const TReg24& _val )						{ reg.pc = _val; }
+
+		TReg24	getPC							() const									{ return reg.pc; }
+		TWord	getCurrentInstructionPC			() const									{ return pcCurrentInstruction; }
+		TWord	getCurrentInstructionSR			() const									{ return m_srCurrentInstruction; }
+
+		ASMJIT_FORCE_INLINE void exec() noexcept
+		{
+			if(g_useJIT)
+				execJit();
+			else
+				execInterpreter();
+		}
+
+		ASMJIT_FORCE_INLINE void execJit() noexcept
+		{
+			m_interruptFunc(this);
+
+			const auto pc = getPC().toWord();
+			LOGJITPC(pc);
+			// must go through the trampoline: it establishes regDspPtr, which blocks no longer set up
+			// themselves. A direct call here leaves regDspPtr at whatever the caller happened to have.
+			m_jit.getTrampoline().execOne(&reg, pc, m_jitEntries[pc]);
+		}
+
+		ASMJIT_FORCE_INLINE void execInterpreter() noexcept
+		{
+			m_interruptFunc(this);
+
+#if DSP56300_DEBUGGER
+			if(m_debugger)
+				m_debugger->onExec(getPC().var);
+#endif
+
+			pcCurrentInstruction = reg.pc.toWord();
+			m_srCurrentInstruction = reg.sr.toWord();
+
+			const auto op = fetchPC();
+
+			execOp(op);
+		}
+
+		template<typename Ta, typename Tb> void execPeriph() noexcept
+		{
+			// this is a super hot function and for some reason the compiler insists of doing all the stack frame work
+			// before this early out. To fix this, we move the remaining code into a helper func below, marked as noinline
+			if (ASMJIT_LIKELY(perif[0]->getTargetClock() > m_instructions))
+				return;
+
+			execPeripherals<Ta, Tb>();
+		}
+
+		template<typename Ta, typename Tb> ASMJIT_NOINLINE void execPeripherals() noexcept
+		{
+			// we do not have any Y peripherals that need processing atm
+			const auto delayA = static_cast<Ta*>(perif[0])->exec();
+//			const auto delayB = static_cast<Tb*>(perif[1])->exec();
+
+			perif[0]->resetDelayCycles(getInstructionCounter(), delayA);
+//			perif[1]->resetDelayCycles(getInstructionCounter(), delayB);
+
+			processExternalInterrupts();
+		}
+
+		uint32_t getRemainingPeripheralsCycles() const
+		{
+			const auto targetCycles = perif[0]->getTargetClock();
+			if(m_instructions > targetCycles)
+				return 0;
+			return static_cast<uint32_t>(targetCycles - m_instructions);
+		}
+
+		void	execInterrupts					();
+		void	execInterrupt					(uint32_t vba);
+		void	execDefaultPreventInterrupt		();
+
+		bool	readReg							( EReg _reg, TReg8& _res ) const;
+		bool	readReg							( EReg _reg, TReg48& _res ) const;
+		bool	readReg							( EReg _reg, TReg5& _res ) const;
+
+		bool	readReg							( EReg _reg, TReg24& _res ) const;
+		bool	writeReg						( EReg _reg, const TReg24& _val );
+
+		bool	readReg							( EReg _reg, TReg56& _res ) const;
+		bool	writeReg						( EReg _reg, const TReg56& _val );
+
+		bool	readRegToInt					( EReg _reg, int64_t& _dst ) const;
+
+		const uint64_t&		getInstructionCounter		() const	{ return m_instructions; }
+		const uint64_t&		getCycles					() const	{ return m_cycles; }
+
+		const char*			getASM						(TWord wordA, TWord wordB);
+		const std::string&	getASM						() const							{ return m_asm; }
+
+		const SRegs&	readRegs						() const		{ return reg; }
+
+		void			readDebugRegs					( dsp56k::SRegs& _dst ) const;
+
+		void			dumpCCCC						() const;
+
+		void			logSC							( const char* _func ) const;
+
+		TWord			registerInterruptFunc			(std::function<void()>&& _func);
+		bool			injectInterrupt					(uint32_t _interruptVectorAddress);
+		bool			injectInterruptImmediate		(uint32_t _interruptVectorAddress);
+		bool			isInterruptMasked				(const TWord _vba) const;
+
+		void			injectExternalInterrupt			(const TWord _vba);
+		void			processExternalInterrupts		();
+
+		bool			hasPendingInterrupts			() const
+		{
+			if(m_processingMode != Default)
+				return true;
+
+			if(!m_pendingExternalInterrupts.empty())
+				return true;
+
+			if(!m_pendingInterrupts.empty())
+				return true;
+
+			return false;
+		}
+
+		// the queue is bounded and injectExternalInterrupt blocks when it is full, which is fatal for a
+		// caller that is itself the one who would let the DSP drain it
+		bool			pendingExternalInterruptsFull	() const
+		{
+			return m_pendingExternalInterrupts.full();
+		}
+
+		bool			hasPendingExternalInterrupts	() const
+		{
+			return !m_pendingExternalInterrupts.empty();
+		}
+
+		// DSP thread only. Edge triggered sources use it to latch one request until the core takes it
+		bool			hasPendingInterrupt				(const TWord _vba) const
+		{
+			for(size_t i=0; i<m_pendingInterrupts.size(); ++i)
+			{
+				if(m_pendingInterrupts[i] == _vba)
+					return true;
+			}
+			return false;
+		}
+
+		void			clearOpcodeCache				();
+		void			clearOpcodeCache				(TWord _address);
+
+		// Cycle count of the instruction at _pc. Delegates to the same shared dsp56k::calcCycles()
+		// that JitOps/JitBlock use, so there is no second implementation that could drift.
+		uint32_t		calcOpcodeCycles				(TWord _pc) const;
+		uint8_t			getOpcodeCycles				(TWord _pc);
+
+		void			dumpRegisters					() const;
+		void			dumpRegisters					(std::stringstream& _ss) const;
+		void			enableTrace						(TraceMode _trace) { m_trace = _trace; }
+
+		Memory&			memory							()											{ return mem; }
+		const Memory&	memory							() const									{ return mem; }
+
+		const SRegs&	regs							() const									{ return reg; }
+		SRegs&			regs							()											{ return reg; }
+
+		const Opcodes&	opcodes							() const									{ return m_opcodes; }
+		Disassembler&	disassembler					()											{ return m_disasm; }
+
+		void			setExternalBusDevice			(IExternalBusDevice* _device)					{ m_externalBusDevice = _device; }
+		IExternalBusDevice*	getExternalBusDevice		() const										{ return m_externalBusDevice; }
+
+		const IPeripherals*	getPeriph					(const size_t _index) const						{ return perif[_index]; }
+		IPeripherals*	getPeriph						(const size_t _index)							{ return perif[_index]; }
+		IPeripherals*	getPeriph						(const EMemArea _area)
+		{
+			switch (_area)
+			{
+			case MemArea_X: return getPeriph(0);
+			case MemArea_Y: return getPeriph(1);
+			default:		return nullptr;
+			}
+		}
+		
+		ProcessingMode getProcessingMode() const		{return m_processingMode;}
+
+		Jit&			getJit							() { return m_jit; }
+		const Jit&		getJit							() const { return m_jit; }
+
+		void			setJitEntries					(const TJitFunc* _funcs)			{ m_jitEntries = _funcs; }
+		const auto&		getJitEntries					() const			{ return m_jitEntries; }
+
+		const auto&		getInterruptFunc				() const			{ return m_interruptFunc; }
+		auto			getExecPeripheralsFunc			() const			{ return m_execPeripheralsFunc; }
+
+		void			terminate						();
+
+		void				setDebugger						(DebuggerInterface* _debugger);
+		DebuggerInterface*	getDebugger						()								{ return m_debugger; }
+
+		bool			isPeripheralAddress(const TWord _addr) const
+		{
+			if(sr_test(SR_SC))
+				return _addr >= XIO_Reserved_High_First_16;
+			return _addr >= XIO_Reserved_High_First;
+		}
+
+		// MS2000 DSP-RESET: the RESET pin went low and back high while the part was running. resetHW() plus what
+		// it leaves out for a running core: pending interrupts are dropped and the processing mode is back to
+		// normal. The instruction and cycle counters keep counting (the peripherals are clocked by them).
+		void resetPin();
+
+		void fastForward(const TWord _instructions, const TWord _cycles)
+		{
+			m_instructions += _instructions;
+			m_cycles += _cycles;
+		}
+
+	private:
+
+		std::string getSSindent() const;
+
+		TWord	fetchOpWordB()
+		{
+			++m_currentOpLen;
+			if(m_processingMode != FastInterrupt)
+				++reg.pc.var;
+			return m_opWordB;
+		}
+
+		// -- execution 
+		TWord fetchPC()
+		{
+			TWord ret;
+			memReadOpcode(reg.pc.toWord(), ret, m_opWordB );
+			++reg.pc.var;
+			return ret;
+		}
+
+		void 	execOp							(TWord op);
+
+		void	exec_jump						(const TInstructionFunc& _func, TWord _op);
+		
+		bool	exec_parallel					(const TInstructionFunc& _instMove, const TInstructionFunc& _instAlu, TWord _op);
+
+		bool	do_exec							( TWord _loopcount, TWord _addr );
+		bool	do_execForever					( TWord _addr );
+		bool	do_start						( const TWord* _loopcount, TWord _addr );
+		bool	do_end							();
+
+		bool	rep_exec						(TWord _loopCount);
+
+		void	traceOp							();
+		void	traceOp							(TWord _pc, TWord _opA, TWord _opB, TWord _opLen);
+
+		// -- decoding helper functions
+
+		int		decode_cccc				( TWord cccc ) const;
+
+		template<TWord mmm>
+		TWord	decode_MMMRRR_read		( TWord _rrr );
+		TWord	decode_MMMRRR_read		( TWord _mmm, TWord _rrr );
+		TWord	decode_XMove_MMRRR		( TWord _mm, TWord _rrr );
+
+		TWord	decode_RRR_read			( TWord _mmmrrr ) const;
+		TWord	decode_RRR_read			( TWord _mmmrrr, int _shortDisplacement ) const;
+
+		template<typename T> T decode_ddddd_read( TWord _ddddd );
+
+		template<typename T> bool decode_ddddd_write(TWord _ddddd, const T& _val );
+
+		// Six-Bit Encoding for all on-chip registers
+		TReg24	decode_dddddd_read		(TWord _dddddd);
+		void	decode_dddddd_write		(TWord _dddddd, TReg24 _val);
+
+		TReg24	decode_ddddd_pcr_read 	( TWord _ddddd );
+		void	decode_ddddd_pcr_write	( TWord _ddddd, TReg24 _val );
+
+		TReg8 decode_EE_read(TWord _ee) const;
+		void decode_EE_write(TWord _ee, TReg8 _val);
+
+		template<TWord ee> TReg24 decode_ee_read();
+		template<TWord ee> void decode_ee_write(const TReg24& _value);
+		TReg24 decode_ee_read(TWord _ee);
+		void decode_ee_write(TWord _ee, const TReg24& _value);
+
+		template<TWord ff>
+		TReg24 decode_ff_read();
+		template<TWord ff>
+		void decode_ff_write(const TReg24& _value);
+
+		TReg24 decode_ff_read(TWord _ff);
+		void decode_ff_write(TWord _ff, const TReg24& _value);
+
+		TReg24 decode_JJ_read(TWord jj) const;
+		TReg56 decode_JJJ_read_56(TWord jjj, bool _b) const;
+		void decode_JJJ_readwrite(TReg56& alu, TWord jjj, bool _b);
+
+		void decode_LLL_read(TWord _lll, TWord& x, TWord& y);
+		void decode_LLL_write(TWord _lll, TReg24 x, TReg24 y);
+
+		void decode_QQQQ_read(TReg24& _s1, TReg24& _s2, TWord _qqqq) const;
+		void decode_QQQ_read(TReg24& _s1, TReg24& _s2, TWord _qqq) const;
+		TReg24 decode_QQ_read(TWord _qq) const;
+		TReg24 decode_qq_read(TWord _qq) const;
+		TReg24 decode_qqq_read(TWord _qqq) const;
+
+		template<typename T> T decode_sss_read( TWord _sss ) const;
+		static TWord decode_sssss(TWord _sssss);
+
+		// -- status register management
+
+		// Writing a CCR bit explicitly makes it clean: a deferred update must not come back later
+		// and overwrite it. Only the CCRMask/CCRBit overloads do this - SRMask values all start at
+		// 0x400, above every CCR bit, so they can never name one.
+		void 	sr_set					( CCRMask _bits )					{ reg.sr.var |= _bits;	ccrCache.dirty &= ~static_cast<uint32_t>(_bits); }
+		void 	sr_set					( SRMask _bits )					{ reg.sr.var |= _bits;	}
+		void 	sr_clear				( CCRMask _bits )					{ reg.sr.var &= ~_bits; ccrCache.dirty &= ~static_cast<uint32_t>(_bits); }
+		void 	sr_clear				( SRMask _bits )					{ reg.sr.var &= ~_bits; }
+
+		void 	sr_toggle				( CCRMask _bits, bool _set )		{ if( _set ) { sr_set(_bits); } else { sr_clear(_bits); } }
+		void 	sr_toggle				( SRMask _bits, bool _set )			{ if( _set ) { sr_set(_bits); } else { sr_clear(_bits); } }
+		void 	sr_toggle				( CCRBit _bit, Bit _value )			{ bitset<int32_t>(reg.sr.var, static_cast<int32_t>(_bit), _value); ccrCache.dirty &= ~(1u << static_cast<uint32_t>(_bit)); }
+
+	public:
+		int 	sr_test					( CCRMask _bits ) const				{ updateDirtyCCR(); return sr_test_noCache(_bits); }
+		int 	sr_test					( SRMask _bits ) const				{ return sr_test_noCache(_bits); }
+		int 	sr_test_noCache			( CCRMask _bits ) const				{ return (reg.sr.var & _bits); }
+		int 	sr_test_noCache			( SRMask _bits ) const				{ return (reg.sr.var & _bits); }
+		int 	sr_val					( CCRBit _bitNum ) const			{ updateDirtyCCR(); return sr_val_noCache(_bitNum); }
+		int 	sr_val_noCache			( CCRBit _bitNum ) const			{ return (reg.sr.var >> _bitNum) & 1; }
+		int 	sr_val_noCache			( SRBit _bitNum ) const				{ return (reg.sr.var >> _bitNum) & 1; }
+
+	private:
+		void	sr_s_update				()
+		{
+			if( sr_test_noCache(CCR_S) )
+				return;
+
+			const TWord offset = sr_val_noCache(SRB_S1) - sr_val_noCache(SRB_S0);
+			const TWord bitA = 46 + offset;
+			const TWord bitB = 45 + offset;
+
+			const TReg56 a = aluA();
+			const TReg56 b = aluB();
+
+			if	(	(bitvalue(a,bitA) != bitvalue(a,bitB))
+				|	(bitvalue(b,bitA) != bitvalue(b,bitB)) )
+				sr_set( CCR_S );
+		}
+
+		void	sr_e_update				( const TReg56& _ab )
+		{
+			/*
+			Extension
+			Indicates when the accumulator extension register is in use. This bit is
+			cleared if all the bits of the integer portion of the 56-bit result are all
+			ones or all zeros; otherwise, this bit is set. As shown below, the
+			Scaling mode defines the integer portion. If the E bit is cleared, then
+			the low-order fraction portion contains all the significant bits; the
+			high-order integer portion is sign extension. In this case, the
+			accumulator extension register can be ignored.
+			S1 / S0 / Scaling Mode / Integer Portion
+			0	0	No Scaling	Bits 55,54..............48,47
+			0	1	Scale Down	Bits 55,54..............49,48
+			1	0	Scale Up	Bits 55,54..............47,46
+			*/
+
+			// The integer portion always ends at bit 55, only its low end moves with the scaling
+			// mode, so build the mask from that low bit. Shifting 0x3fe right for Scale Up dropped
+			// bit 55 and reported E=0 where the hardware sets it (sim56300: sr=$000b00, tst a with
+			// a=$80000000000000 -> E set, and likewise for a=$7fc00000000000).
+			const auto lowBit = 1 + sr_val_noCache(SRB_S0) - sr_val_noCache(SRB_S1);
+			const uint32_t mask = 0x3ff & ~((1u << lowBit) - 1u);
+
+			const uint32_t d2 = static_cast<uint32_t>(_ab.var >> (46 + g_aluShift));
+
+			const uint32_t m2 = d2 & mask;
+
+			const auto res = static_cast<int>(m2 != mask) & static_cast<int>(m2 != 0);
+
+			sr_toggle( CCRB_E, Bit(res));
+		}
+
+		void sr_u_update( const TReg56& _ab )
+		{
+			const auto sOffset = sr_val_noCache(SRB_S0) - sr_val_noCache(SRB_S1);
+
+			const auto msb = 47 + g_aluShift + sOffset;
+			const auto lsb = 46 + g_aluShift + sOffset;
+
+			sr_toggle( CCRB_U, bitvalue(_ab,msb) == bitvalue(_ab,lsb) );
+		}
+
+		void sr_n_update( const TReg56& _ab )
+		{
+			// Negative
+			// Set if the MSB of the result is set; otherwise, this bit is cleared.	
+			sr_toggle( CCRB_N, bitvalue<55 + g_aluShift>(_ab) );
+		}
+
+		void sr_z_update( const TReg56& _ab )
+		{
+			const TReg56 zero(static_cast<TReg56::MyType>(0));
+			sr_toggle( CCR_Z, zero == _ab );
+		}
+
+		template<typename T>
+		void	sr_c_update_arithmetic( const T& _old, const T& _new )
+		{
+			sr_toggle( CCRB_C, bitvalue<55 + g_aluShift>(_old) != bitvalue<55 + g_aluShift>(_new) );
+		}
+
+		void sr_l_update_by_v()
+		{
+			// L is never cleared automatically, so only test to set
+			if( sr_test_noCache(CCR_V) )
+				sr_set(CCR_L);
+		}
+
+		// value needs to fit into 48 (arithmetic saturation mode) or 56 bits
+		void sr_v_update( const int64_t& _notLimitedResult, TReg56& _result )
+		{
+			if( sr_test_noCache(SR_SM) )
+			{
+				const unsigned int test=static_cast<unsigned int>(_result.var>>(47 + g_aluShift))&0x13;
+				if (!(test ^ 0x13) || !(test)) sr_set(CCR_V);
+			}
+			else
+			{
+				sr_toggle( CCR_V, ((_notLimitedResult>>(48 + g_aluShift))^(_result.var>>(48 + g_aluShift)))&255);
+			}
+		}
+
+		void setSR(const TReg24& _sr)
+		{
+			ccrCache.dirty = 0;
+			reg.sr = _sr;
+		}
+
+		void setSR(const TWord _sr)
+		{
+			setSR(TReg24(_sr));
+		}
+
+	public:
+		const TReg24& getSR() const
+		{
+			updateDirtyCCR();
+			return reg.sr;
+		}
+	private:
+
+		void setCCRDirty(bool ab, const TReg56& _alu, uint32_t _dirtyBitsMask);
+		void updateDirtyCCR() const;
+		void resetCCRCache() { ccrCache.dirty = 0; }
+
+		void sr_debug(char* _dst) const;
+
+		// register access helpers
+
+	public:
+		TReg24	x0				() const							{ return loword(reg.x); }
+		TReg24	x1				() const							{ return hiword(reg.x); }
+	private:
+		void	x0				(const TReg24& _val)				{ loword(reg.x,_val); }
+		void	x0				(const TWord _val)					{ loword(reg.x,TReg24(_val)); }
+		void	x1				(const TReg24& _val)				{ hiword(reg.x,_val); }
+		void	x1				(const TWord _val)					{ hiword(reg.x,TReg24(_val)); }
+
+		// set signed fraction (store 8 bit data in the MSB of the register)
+		void	x0				(TReg8 _val)						{ x0(TReg24(_val.toWord()<<16)); }
+		void	x1				(TReg8 _val)						{ x1(TReg24(_val.toWord()<<16)); }
+
+	public:
+		TReg24	y0				() const							{ return loword(reg.y); }
+		TReg24	y1				() const							{ return hiword(reg.y); }
+	private:
+		void	y0				(const TReg24& _val)				{ loword(reg.y,_val); }
+		void	y0				(const TWord& _val)					{ loword(reg.y,TReg24(_val)); }
+		void	y1				(const TReg24& _val)				{ hiword(reg.y,_val); }
+		void	y1				(const TWord& _val)					{ hiword(reg.y,TReg24(_val)); }
+
+		// set signed fraction (store 8 bit data in the MSB of the register)
+		void	y0				(const TReg8& _val)					{ y0(TReg24(_val.toWord()<<16)); }
+		void	y1				(const TReg8& _val)					{ y1(TReg24(_val.toWord()<<16)); }
+
+		// a/b are stored left-aligned in memory (see DspRegs::a). These accessors are the ONLY
+		// places that convert - every other user sees the usual right-aligned 56 bit value.
+		static constexpr int g_aluShift = 8;
+
+		TReg56	aluA			() const							{ return TReg56(static_cast<TReg56::MyType>((reg.a.var >> g_aluShift) & TReg56::bitMask)); }
+		TReg56	aluB			() const							{ return TReg56(static_cast<TReg56::MyType>((reg.b.var >> g_aluShift) & TReg56::bitMask)); }
+		TReg56	getALU			(const bool _b) const				{ return _b ? aluB() : aluA(); }
+
+		void	setALU			(const bool _b, const TReg56& _v)	{ (_b ? reg.b : reg.a).var = _v.var << g_aluShift; }
+
+		// Left-aligned domain helpers. The accumulator occupies bits 63..8, so the 56-bit mask and the
+		// sign extension that the right-aligned form needed both change shape:
+		// - masking means clearing the low byte (THE INVARIANT), not truncating to 56 bits
+		// - the value is already sign-correct across all 64 bits, so no sign extension is needed
+		static void		aluMask			(TReg56& _v)					{ _v.var &= ~static_cast<TReg56::MyType>(0xff); }
+		static TReg56::MyType aluSignextend(const TReg56& _v)		{ return _v.var; }
+
+		// builds an ALU operand in the left-aligned domain from a right-aligned source
+		template<typename T> static TReg56 toAluOperand(const T& _src)	{ TReg56 r; convert(r, _src); r.var <<= g_aluShift; return r; }
+
+		// sub-register access straight on the left-aligned register: no round trip through the
+		// right-aligned form, the field positions simply move up by g_aluShift
+		static TReg24	aluField24	(const TReg56& _r, const int _pos)	{ return TReg24(static_cast<int32_t>((_r.var >> (_pos + g_aluShift)) & 0xffffff)); }
+		static void		aluField24	(TReg56& _r, const int _pos, const TReg24& _v)	{ _r.var = (_r.var & ~(TReg56::MyType(0xffffff) << (_pos + g_aluShift))) | (TReg56::MyType(_v.var & 0xffffff) << (_pos + g_aluShift)); }
+		static TReg8	aluField8	(const TReg56& _r)					{ return TReg8(static_cast<uint8_t>((_r.var >> (48 + g_aluShift)) & 0xff)); }
+		static void		aluField8	(TReg56& _r, const TReg8& _v)		{ _r.var = (_r.var & ~(TReg56::MyType(0xff) << (48 + g_aluShift))) | (TReg56::MyType(_v.var & 0xff) << (48 + g_aluShift)); }
+
+		TReg24	a0				() const							{ return aluField24(reg.a, 0); }
+		TReg24	a1				() const							{ return aluField24(reg.a, 24); }
+		TReg8	a2				() const							{ return aluField8(reg.a); }
+
+		void	a0				(const TReg24& _val)				{ aluField24(reg.a, 0, _val); }
+		void	a1				(const TReg24& _val)				{ aluField24(reg.a, 24, _val); }
+		void	a2				(const TReg8& _val)					{ aluField8(reg.a, _val); }
+
+		TReg24	b0				() const							{ return aluField24(reg.b, 0); }
+		TReg24	b1				() const							{ return aluField24(reg.b, 24); }
+		TReg8	b2				() const							{ return aluField8(reg.b); }
+
+		void	b0				(const TReg24& _val)				{ aluField24(reg.b, 0, _val); }
+		void	b1				(const TReg24& _val)				{ aluField24(reg.b, 24, _val); }
+		void	b2				(const TReg8& _val)					{ aluField8(reg.b, _val); }
+
+		void	iprc			(const TWord _value)				{ memWritePeriph(MemArea_X, XIO_IPRC, _value); }
+		void	iprp			(const TWord _value)				{ memWritePeriph(MemArea_X, XIO_IPRP, _value); }
+
+		TWord	iprc			() const							{ return memReadPeriph(MemArea_X, XIO_IPRC, Nop); }
+		TWord	iprp			() const							{ return memReadPeriph(MemArea_X, XIO_IPRP, Nop); }
+
+		template<typename T> T getA()
+		{
+			TReg56 temp = reg.a;
+			scale( temp );
+			T res;
+			limit_transfer( res, temp );
+			return res;
+		}
+
+		template<typename T> T getB()
+		{
+			TReg56 temp(reg.b);
+			scale(temp);
+			T res;
+			limit_transfer( res, temp );
+			return res;
+		}
+
+		void scale( TReg56& _scale ) const
+		{
+			if( sr_test_noCache(SR_S1) )
+				_scale.var <<= 1;
+			else if( sr_test_noCache(SR_S0) )
+				_scale.var >>= 1;
+		}
+
+		void limit_transfer( int& _dst, const TReg56& _src )
+		{
+			// left-aligned the value is already sign-correct in 64 bits, no sign extension needed
+			const int64_t test = _src.var;
+
+			if(sr_test_noCache(SR_SA))
+			{
+				// Sixteen-bit Arithmetic mode (FM 3.5.1.2): the scaled and limited 16-bit word goes to bus
+				// bits 15..0, bus bits 23..16 carry its sign extension. Limiting triggers exactly when the
+				// value does not fit into 48 bits, i.e. when EXT is not the sign extension of bit 47.
+				if( test < (-140737488355328ll << g_aluShift) )	// ff 8000 0000 0000
+				{
+					sr_set( CCR_L );
+					_dst = 0xff8000;
+				}
+				else if( test >= (140737488355328ll << g_aluShift) )	// 00 8000 0000 0000
+				{
+					sr_set( CCR_L );
+					_dst = 0x007fff;
+				}
+				else
+				{
+					const auto word = static_cast<uint32_t>(test >> (32 + g_aluShift)) & 0xffff;
+					_dst = static_cast<int>(word | ((word & 0x8000) ? 0xff0000 : 0));
+				}
+				return;
+			}
+
+			if( test < (-140737488355328ll << g_aluShift) )	// ff 800000 000000
+			{
+				sr_set( CCR_L );
+				_dst = 0x800000;
+			}
+			else if( test > (140737471578112ll << g_aluShift) )	// 00 7fffff 000000
+			{
+				sr_set( CCR_L );
+				_dst = 0x7FFFFF;
+			}
+			else
+				_dst = static_cast<int>(_src.var >> (24 + g_aluShift)) & 0xffffff;
+			assert( (_dst & 0xff000000) == 0 );
+		}
+
+		void limit_transfer( TReg24& _dst, const TReg56& _src )
+		{
+			limit_transfer( _dst.var, _src );
+		}
+
+		void limit_transfer( TWord& _dst, const TReg56& _src )
+		{
+			limit_transfer( reinterpret_cast<int&>(_dst), _src );
+		}
+
+		void limit_arithmeticSaturation( TReg56& _dst )
+		{
+			if( !sr_test_noCache(SR_SM) )
+				return;
+
+			const auto v = (bitvalue( _dst, 55 + g_aluShift ).bit << 2) | (bitvalue( _dst, 48 + g_aluShift ).bit << 1) | bitvalue(_dst, 47 + g_aluShift).bit;
+
+			switch( v )
+			{
+			case 0:
+			case 7:	/* do nothing */								break;
+			case 1:
+			case 2:
+			case 3:	_dst.var = 0x007fffffffffffll << g_aluShift;	sr_set(CCR_V);	break;
+			case 4:
+			case 5:
+			case 6: _dst.var = static_cast<TReg56::MyType>(0xff800000000000ull << g_aluShift);	sr_set(CCR_V);	break;
+			default: assert( 0 && "impossible" );
+			}
+		}
+
+		TReg8	ccr				() const							{ return byte0(getSR()); }
+		TReg8	mr				() const							{ return byte1(reg.sr); }
+		void	ccr				( TReg8 _val )						{ byte0(reg.sr,_val); resetCCRCache(); }
+		void	mr				( TReg8 _val )						{ byte1(reg.sr,_val); }
+
+		TReg8	com				() const							{ return byte0(reg.omr); }
+		TReg8	eom				() const							{ return byte1(reg.omr); }
+		void	com				( TReg8 _val )						{ byte0(reg.omr,_val); }
+		void	eom				( TReg8 _val )						{ byte1(reg.omr,_val); }
+
+		void	setA			( const TReg24& _src )				{ set24ToAlu(false, _src); }
+		void	setB			( const TReg24& _src )				{ set24ToAlu(true, _src); }
+
+		void	setA			( const TReg56& _src )				{ setALU(false, _src); }
+		void	setB			( const TReg56& _src )				{ setALU(true, _src); }
+
+		bool isSixteenBitArithmetic() const { return sr_test_noCache(SR_SA) != 0; }
+
+		// Sixteen-bit Arithmetic mode data organization (FM figure 3-10): the accumulator is an 8 bit
+		// EXT (bits 55-48) plus a 16 bit MSP (47-32) and a 16 bit LSP (23-8). EXTRACT, EXTRACTU and
+		// INSERT operate on the 40 bit EXT:MSP:LSP value rather than on the raw 56 bit register, and a
+		// write through this path clears the least significant byte of each half. Every rule below is a
+		// fit to the complete control word space captured from the reference simulator, all 48856 cases
+		// - see doc/sixteenBitArithmetic.md and the generated unittests_sa_bitfield.h.
+		// Entry point the JIT calls out to for the Sixteen-bit Arithmetic form of EXTRACT/EXTRACTU/
+		// INSERT instead of inlining it. SA is a rare mode, and sharing the interpreter's implementation
+		// is what keeps the two engines identical by construction rather than by test.
+	public:
+		void saBitfield(TWord _control, TWord _packed);
+	private:
+
+		static constexpr uint64_t g_sa40Mask = 0xffffffffffull;
+
+		static uint64_t saTo40(const TReg56& _acc)
+		{
+			const auto v = static_cast<uint64_t>(_acc.var) >> g_aluShift;
+			return (((v >> 48) & 0xff) << 32) | (((v >> 32) & 0xffff) << 16) | ((v >> 8) & 0xffff);
+		}
+
+		static TInt64 saFrom40(const uint64_t _v)
+		{
+			const uint64_t v = (((_v >> 32) & 0xff) << 48) | (((_v >> 16) & 0xffff) << 32) | ((_v & 0xffff) << 8);
+			return static_cast<TInt64>(v << g_aluShift);
+		}
+
+		// The control word carries a width and an offset. A control REGISTER is read like any other
+		// register in SA mode, so it holds that word in bits 23-8 and its fields sit 8 higher than an
+		// immediate's - simulator: register $081000 and immediate $000810 give the identical result,
+		// while register $000810 is a width of zero and does nothing.
+		void saBitfieldControl(const TWord _control, const bool _controlIsRegister, TWord& _width, TWord& _offset) const
+		{
+			const auto sa = isSixteenBitArithmetic();
+			_width  = (_control >> (sa ? (_controlIsRegister ? 16 : 8) : 12)) & 0x3f;
+			_offset = (_control >> (sa && _controlIsRegister ? 8 : 0)) & 0x3f;
+		}
+
+		// EXTRACT/EXTRACTU: a 6 bit width, an offset that addresses the 40 bit value directly and reads
+		// zero from bit 40 up. The source is signed - EXT is its sign extension - so the field picks up
+		// the sign above bit 39. A width beyond the 40 bit datapath yields no EXT at all.
+		static uint64_t saExtract40(const TReg56& _src, const TWord _width, const TWord _offset, const bool _signed)
+		{
+			const auto width = _width & 0x3f;
+			if(!width || _offset >= 40)
+				return 0;
+
+			const uint64_t mask = (1ull << width) - 1;
+			const auto v = static_cast<TInt64>(saTo40(_src) << 24) >> 24;	// sign extend from bit 39
+			auto field = static_cast<uint64_t>(v >> _offset) & mask;
+
+			if(_signed && (field >> (width - 1)) & 1)
+				field |= ~mask;
+
+			if(width > 40)
+				field &= 0xffffffffull;
+
+			return field & g_sa40Mask;
+		}
+
+		// INSERT: a 5 bit width clamped to the 16 bits a source register can supply, and an offset that
+		// carries a bias of 16. A field below the bias inserts nothing, one running off the top is simply
+		// truncated. The source is read through the SA convention, its 16 bit value living in bits 23-8.
+		static uint64_t saInsert40(const TReg56& _dst, const TWord _src, const TWord _width, const TWord _offset)
+		{
+			auto v = saTo40(_dst);
+
+			const auto width = std::min<TWord>(_width & 0x1f, 16);
+			const auto offset = static_cast<int32_t>(_offset) - 16;
+
+			if(width && offset >= 0)
+			{
+				const uint64_t mask = (1ull << width) - 1;
+				const uint64_t s = (_src >> 8) & 0xffff;
+				v = (v & ~((mask << offset) & g_sa40Mask)) | ((s & mask) << offset);
+			}
+			return v & g_sa40Mask;
+		}
+
+
+		// Sixteen-bit Arithmetic mode data organization (FM figure 3-10): a data ALU register holds its
+		// 16-bit value in bits 23..8 while the buses carry it in bits 15..0.
+		static TWord busToReg16(const TWord _bus)	{ return (_bus & 0xffff) << 8; }
+		static TWord reg16ToBus(const TWord _reg)	{ return (_reg >> 8) & 0xffff; }
+
+		// bus -> register (X0, X1, Y0, Y1, A0, A1, B0, B1), table 3-3
+		TReg24 busToReg(const TReg24& _bus) const
+		{
+			if(isSixteenBitArithmetic())
+				return TReg24(static_cast<int>(busToReg16(_bus.toWord())));
+			return _bus;
+		}
+
+		// register (X0, X1, Y0, Y1, A0, A1, B0, B1) -> bus, table 3-4
+		TReg24 regToBus(const TReg24& _reg) const
+		{
+			if(isSixteenBitArithmetic())
+				return TReg24(static_cast<int>(reg16ToBus(_reg.toWord())));
+			return _reg;
+		}
+
+		// 48-bit ALU operand (X or Y) in 16-bit mode: X1[23..8] -> bits 47..32, X0[23..8] -> bits 31..16
+		static TReg56::MyType xyTo56SixteenBit(const TReg48& _xy)
+		{
+			const auto v = static_cast<uint64_t>(_xy.var);
+			const auto res = (v & 0xffff00000000ull) | ((v & 0xffff00ull) << 8);
+			return static_cast<TReg56::MyType>(res | ((res & 0x800000000000ull) ? 0xff000000000000ull : 0));
+		}
+
+		// template helpers for the ddddd read/write decoders: only 24-bit bus transfers get the 16-bit remap
+		TReg24 busToReg(const TWord _bus) const { return busToReg(TReg24(static_cast<int>(_bus))); }
+
+		template<typename T> TReg24 dataRegToBus(const TReg24& _reg) const
+		{
+			if constexpr (std::is_same_v<T, TReg56>)	return _reg;
+			else										return regToBus(_reg);
+		}
+		template<typename T> auto busToDataReg(const T& _val) const
+		{
+			if constexpr (std::is_same_v<T, TReg8>)		return _val;
+			else										return busToReg(_val);
+		}
+
+		// MOVE A,L / B,L: the whole accumulator scaled and limited to 48 bits. The value is brought down to a
+		// sign-extended 56 bit integer before scaling, so that Scale Up cannot push bit 55 out of the host word and
+		// flip the sign of the limit.
+		void limitTransferLong(const TReg56& _src, TWord& _x, TWord& _y)
+		{
+			int64_t value = static_cast<int64_t>(static_cast<uint64_t>(_src.var) << (8 - g_aluShift)) >> 8;
+
+			if(sr_test_noCache(SR_S1))
+				value *= 2;
+			else if(sr_test_noCache(SR_S0))
+				value >>= 1;
+
+			constexpr int64_t maximum = 0x00007fffffffffffll;
+			constexpr int64_t minimum = -0x0000800000000000ll;
+
+			if(value > maximum)
+			{
+				sr_set(CCR_L);
+				value = maximum;
+			}
+			else if(value < minimum)
+			{
+				sr_set(CCR_L);
+				value = minimum;
+			}
+
+			_x = static_cast<TWord>(value >> 24) & 0xffffff;
+			_y = static_cast<TWord>(value) & 0xffffff;
+		}
+
+		// 48-bit (X:Y) transfer of a full accumulator in 16-bit mode (FM table 3-4): scaled and limited to
+		// 32 bits, X gets the 16 MSBs sign-extended, Y the 16 LSBs zero-extended
+		void limitTransferSixteenBitLong(TReg56 _src, TWord& _x, TWord& _y)
+		{
+			scale(_src);
+			const int64_t test = _src.var;
+			if(test < (-140737488355328ll << g_aluShift))
+			{
+				sr_set(CCR_L);
+				_x = 0xff8000;
+				_y = 0x000000;
+			}
+			else if(test >= (140737488355328ll << g_aluShift))
+			{
+				sr_set(CCR_L);
+				_x = 0x007fff;
+				_y = 0x00ffff;
+			}
+			else
+			{
+				const auto hi = static_cast<TWord>(test >> (32 + g_aluShift)) & 0xffff;
+				_x = hi | ((hi & 0x8000) ? 0xff0000 : 0);
+				_y = static_cast<TWord>(test >> (16 + g_aluShift)) & 0xffff;
+			}
+		}
+
+		// 48-bit (X:Y) transfer into a full accumulator in 16-bit mode (FM table 3-3), unshifted representation
+		static TReg56::MyType sixteenBitLongToAlu(const TReg24& _x, const TReg24& _y)
+		{
+			const auto hi = static_cast<uint64_t>(_x.toWord() & 0xffff);
+			const auto lo = static_cast<uint64_t>(_y.toWord() & 0xffff);
+			auto res = (hi << 32) | (lo << 16);
+			if(hi & 0x8000)
+				res |= 0xff000000000000ull;
+			return static_cast<TReg56::MyType>(res);
+		}
+
+		void set24ToAlu(const bool _ab, const TReg24& _src)
+		{
+			TReg56 value;
+			if(sr_test_noCache(SR_SA))
+			{
+				const auto word = _src.toWord() & 0xffff;
+				// setALU() applies g_aluShift, so construct the unshifted
+				// accumulator representation here: bus bits 15..0 become
+				// accumulator bits 47..32 in 16-bit arithmetic mode.
+				value.var = static_cast<TReg56::MyType>(word) << 32;
+				if(word & 0x8000)
+					value.var |= static_cast<TReg56::MyType>(0xff) << 48;
+			}
+			else
+				convert(value, _src);
+			setALU(_ab, value);
+		}
+
+		void 	set_m			(int which, TWord val);
+		
+		// STACK
+		void	decSP			();
+		void	incSP			();
+	public:
+		TWord	ssIndex			() const							{ return reg.sp.var & 0xf; }
+	private:
+		void	ssIndex			(const TWord _index)				{ reg.sp.var = (reg.sp.var & ~0xf) | (_index & 0xf); }
+
+		TReg24	ssh()				{ TReg24 res = hiword(reg.ss[ssIndex()]); decSP(); return res; }
+		TReg24	ssl() const			{ return loword(reg.ss[ssIndex()]); }
+
+		void	ssl(const TReg24& _val)	{ loword(reg.ss[ssIndex()],_val); }
+		void	ssh(const TReg24& _val)	{ incSP(); hiword(reg.ss[ssIndex()],_val); }
+
+		void	pushPCSR()			{ ssh(reg.pc); ssl(getSR()); }
+		void	popPCSR()			{ setSR(ssl()); setPC(ssh()); }
+		void	popPC()				{ setPC(ssh()); }
+
+		// - ALU
+		void	alu_and				( bool ab, TWord   _val );
+		void	alu_or				( bool ab, TWord   _val );
+		void	alu_eor				( bool ab, TWord   _val );
+		void	alu_add				( bool ab, const TReg56& _val, bool _carryIn = false );
+		void	alu_cmp				( bool ab, const TReg56& _val, bool _magnitude );
+		void	alu_cmpu			( bool ab, const TReg56& _val );
+		void	alu_sub				( bool ab, const TReg56& _val, bool _carryIn = false );
+		void	alu_asr				( bool abDst, bool abSrc, int _shiftAmount );
+		void	alu_asl				( bool abDst, bool abSrc, int _shiftAmount );
+
+		void	alu_lsl				( bool ab, int _shiftAmount );
+		void	alu_lsr				( bool ab, int _shiftAmount );
+
+		void	alu_addl			(bool ab);
+		void	alu_addr			(bool ab);
+
+		void	alu_rol				(bool ab);
+
+		void	alu_clr				(bool ab);
+		
+		TWord	alu_bclr			( TWord _bit, TWord _val );
+		void	alu_mpy				( bool ab, const TReg24& _s1, const TReg24& _s2, bool _negate, bool _accumulate );
+		void	alu_mpysuuu			( bool ab, TReg24 _s1, TReg24 _s2, bool _negate, bool _accumulate, bool _suuu );
+		void	alu_dmac			( bool ab, TReg24 _s1, TReg24 _s2, bool _negate, bool srcUnsigned, bool dstUnsigned );
+		void	alu_mac				( bool ab, TReg24 _s1, TReg24 _s2, bool _negate, bool _uu );
+
+		void	alu_rnd				( bool _ab );
+
+		bool	alu_multiply		(TWord _op);
+
+		void	alu_abs				( bool ab );
+
+		void	alu_tfr				( bool ab, const TReg56& src);
+
+		void	alu_tst				( bool ab );
+
+		void	alu_neg				(bool ab);
+
+		void	alu_not				(bool ab);
+
+		void	alu_insert			(bool abDst, const TWord src, TWord widthOffset, bool controlIsRegister);
+		void	alu_extract		(bool abDst, bool abSrc, TWord widthOffset, bool controlIsRegister);
+		void	alu_extractu		(bool abDst, bool abSrc, TWord widthOffset, bool controlIsRegister);
+
+		// -- memory
+
+	public:
+		bool	memWriteP			( TWord _offset, TWord _value );
+		bool	memWrite			( EMemArea _area, TWord _offset, TWord _value );
+		bool	memWritePeriph		( EMemArea _area, TWord _offset, TWord _value );
+		bool	memWritePeriphFFFF80( EMemArea _area, TWord _offset, TWord _value );
+		bool	memWritePeriphFFFFC0( EMemArea _area, TWord _offset, TWord _value );
+
+	private:
+		void	notifyProgramMemWrite(TWord _offset);
+		
+		TWord	memRead				( EMemArea _area, TWord _offset ) const;
+		void	memReadOpcode		( TWord _offset, TWord& _wordA, TWord& _wordB ) const;
+		TWord	memReadPeriph		( EMemArea _area, TWord _offset, Instruction _inst) const;
+		TWord	memReadPeriphFFFF80	( EMemArea _area, TWord _offset, Instruction _inst) const;
+		TWord	memReadPeriphFFFFC0	( EMemArea _area, TWord _offset, Instruction _inst) const;
+
+		void	aarTranslate		( EMemArea _area, TWord& _offset ) const;
+
+		// --- operations
+	public:
+		void op_Abs(TWord op);
+		template<TWord ab> void opCE_Abs(TWord op);
+		void op_ADC(TWord op);
+		void op_Add_SD(TWord op);
+		void op_Add_xx(TWord op);
+		void op_Add_xxxx(TWord op);
+		void op_Addl(TWord op);
+		void op_Addr(TWord op);
+		template<TWord D, TWord JJ> void opCE_And_SD(TWord op);
+		void op_And_SD(TWord op);
+		void op_And_xx(TWord op);
+		void op_And_xxxx(TWord op);
+		void op_Andi(TWord op);
+		void op_Asl_D(TWord op);
+		template<TWord ab> void opCE_Asl_D(TWord op);
+		void op_Asl_ii(TWord op);
+		void op_Asl_S1S2D(TWord op);
+		void op_Asr_D(TWord op);
+		void op_Asr_ii(TWord op);
+		void op_Asr_S1S2D(TWord op);
+		void op_Bcc_xxxx(TWord op);
+		void op_Bcc_xxx(TWord op);
+		void op_Bcc_Rn(TWord op);
+		void op_Bchg_ea(TWord op);
+		void op_Bchg_aa(TWord op);
+		void op_Bchg_pp(TWord op);
+		void op_Bchg_qq(TWord op);
+		void op_Bchg_D(TWord op);
+		void op_Bclr_ea(TWord op);
+		void op_Bclr_aa(TWord op);
+		void op_Bclr_pp(TWord op);
+		void op_Bclr_qq(TWord op);
+		void op_Bclr_D(TWord op);
+		void op_Bra_xxxx(TWord op);
+		void op_Bra_xxx(TWord op);
+		void op_Bra_Rn(TWord op);
+		void op_Brclr_ea(TWord op);
+		void op_Brclr_aa(TWord op);
+		void op_Brclr_pp(TWord op);
+		void op_Brclr_qq(TWord op);
+		void op_Brclr_S(TWord op);
+		void op_BRKcc(TWord op);
+		void op_Brset_ea(TWord op);
+		void op_Brset_aa(TWord op);
+		void op_Brset_pp(TWord op);
+		void op_Brset_qq(TWord op);
+		void op_Brset_S(TWord op);
+		void op_BScc_xxxx(TWord op);
+		void op_BScc_xxx(TWord op);
+		void op_BScc_Rn(TWord op);
+		void op_Bsclr_ea(TWord op);
+		void op_Bsclr_aa(TWord op);
+		void op_Bsclr_pp(TWord op);
+		void op_Bsclr_qq(TWord op);
+		void op_Bsclr_S(TWord op);
+		void op_Bset_ea(TWord op);
+		void op_Bset_aa(TWord op);
+		void op_Bset_pp(TWord op);
+		void op_Bset_qq(TWord op);
+		void op_Bset_D(TWord op);
+		void op_Bsr_xxxx(TWord op);
+		void op_Bsr_xxx(TWord op);
+		void op_Bsr_Rn(TWord op);
+		void op_Bsset_ea(TWord op);
+		void op_Bsset_aa(TWord op);
+		void op_Bsset_pp(TWord op);
+		void op_Bsset_qq(TWord op);
+		void op_Bsset_S(TWord op);
+		void op_Btst_ea(TWord op);
+		void op_Btst_aa(TWord op);
+		void op_Btst_pp(TWord op);
+		void op_Btst_qq(TWord op);
+		void op_Btst_D(TWord op);
+		void op_Clb(TWord op);
+		void op_Clr(TWord op);
+		void op_Cmp_S1S2(TWord op);
+		void op_Cmp_xxS2(TWord op);
+		void op_Cmp_xxxxS2(TWord op);
+		void op_Cmpm_S1S2(TWord op);
+		void op_Cmpu_S1S2(TWord op);
+		void op_Debug(TWord op);
+		void op_Debugcc(TWord op);
+		void op_Dec(TWord op);
+		void op_Div(TWord op);
+		void op_Dmac(TWord op);
+		void op_Do_ea(TWord op);
+		void op_Do_aa(TWord op);
+		void op_Do_xxx(TWord op);
+		void op_Do_S(TWord op);
+		void op_DoForever(TWord op);
+		void op_Dor_ea(TWord op);
+		void op_Dor_aa(TWord op);
+		void op_Dor_xxx(TWord op);
+		void op_Dor_S(TWord op);
+		void op_DorForever(TWord op);
+		void op_Enddo(TWord op);
+		void op_Eor_SD(TWord op);
+		void op_Eor_xx(TWord op);
+		void op_Eor_xxxx(TWord op);
+		void op_Extract_S1S2(TWord op);
+		void op_Extract_CoS2(TWord op);
+		void op_Extractu_S1S2(TWord op);
+		void op_Extractu_CoS2(TWord op);
+		void op_Ifcc(TWord op);
+		void op_Ifcc_U(TWord op);
+		void op_Illegal(TWord op);
+		void op_Inc(TWord op);
+		void op_Insert_S1S2(TWord op);
+		void op_Insert_CoS2(TWord op);
+		void op_Jcc_xxx(TWord op);
+		void op_Jcc_ea(TWord op);
+		void op_Jclr_ea(TWord op);
+		void op_Jclr_aa(TWord op);
+		void op_Jclr_pp(TWord op);
+		void op_Jclr_qq(TWord op);
+		void op_Jclr_S(TWord op);
+		void op_Jmp_ea(TWord op);
+		void op_Jmp_xxx(TWord op);
+		void op_Jscc_xxx(TWord op);
+		void op_Jscc_ea(TWord op);
+		void op_Jsclr_ea(TWord op);
+		void op_Jsclr_aa(TWord op);
+		void op_Jsclr_pp(TWord op);
+		void op_Jsclr_qq(TWord op);
+		void op_Jsclr_S(TWord op);
+		void op_Jset_ea(TWord op);
+		void op_Jset_aa(TWord op);
+		void op_Jset_pp(TWord op);
+		void op_Jset_qq(TWord op);
+		void op_Jset_S(TWord op);
+		void op_Jsr_ea(TWord op);
+		void op_Jsr_xxx(TWord op);
+		void op_Jsset_ea(TWord op);
+		void op_Jsset_aa(TWord op);
+		void op_Jsset_pp(TWord op);
+		void op_Jsset_qq(TWord op);
+		void op_Jsset_S(TWord op);
+		void op_Lra_Rn(TWord op);
+		void op_Lra_xxxx(TWord op);
+		void op_Lsl_D(TWord op);
+		void op_Lsl_ii(TWord op);
+		void op_Lsl_SD(TWord op);
+		void op_Lsr_D(TWord op);
+		void op_Lsr_ii(TWord op);
+		void op_Lsr_SD(TWord op);
+		void op_Lua_ea(TWord op);
+		void op_Lua_Rn(TWord op);
+		void op_Mac_S1S2(TWord op);
+		void op_Mac_S(TWord op);
+		void op_Maci_xxxx(TWord op);
+		void op_Macsu(TWord op);
+		void op_Macr_S1S2(TWord op);
+		void op_Macr_S(TWord op);
+		void op_Macri_xxxx(TWord op);
+		void op_Max(TWord op);
+		void op_Maxm(TWord op);
+		void op_Merge(TWord op);
+		void op_Move_Nop(TWord op);
+		void op_Move_xx(TWord op);
+		void op_Mover(TWord op);
+		void op_Move_ea(TWord op);
+		template<TWord W, TWord MMM> void opCE_Movex_ea(TWord op);
+		template<TWord W> void opCE_Movex_aa(TWord op);
+		void op_Movex_Rnxxxx(TWord op);
+		void op_Movex_Rnxxx(TWord op);
+		void op_Movexr_ea(TWord op);
+		void op_Movexr_A(TWord op);
+		template<TWord W, TWord MMM> void opCE_Movey_ea(TWord op);
+		template<TWord W> void opCE_Movey_aa(TWord op);
+		void op_Movey_Rnxxxx(TWord op);
+		void op_Movey_Rnxxx(TWord op);
+		void op_Moveyr_ea(TWord op);
+		void op_Moveyr_A(TWord op);
+		void op_Movel_ea(TWord op);
+		void op_Movel_aa(TWord op);
+		void op_Movexy(TWord op);
+		template<TWord W, TWord w, TWord ee, TWord ff>
+		void opCE_Movexy(TWord op);
+		void op_Movec_ea(TWord op);
+		void op_Movec_aa(TWord op);
+		void op_Movec_S1D2(TWord op);
+		void op_Movec_xx(TWord op);
+		void op_Movem_ea(TWord op);
+		void op_Movem_aa(TWord op);
+		void op_Movep_ppea(TWord op);
+		void op_Movep_Xqqea(TWord op);
+		void op_Movep_Yqqea(TWord op);
+		void op_Movep_eapp(TWord op);
+		void op_Movep_eaqq(TWord op);
+		void op_Movep_Spp(TWord op);
+		void op_Movep_SXqq(TWord op);
+		void op_Movep_SYqq(TWord op);
+		void op_Mpy_S1S2D(TWord op);
+		void op_Mpy_SD(TWord op);
+		void op_Mpy_su(TWord op);
+		void op_Mpyi(TWord op);
+		void op_Mpyr_S1S2D(TWord op);
+		void op_Mpyr_SD(TWord op);
+		void op_Mpyri(TWord op);
+		void op_Neg(TWord op);
+		void op_Nop(TWord op);
+		void op_Norm(TWord op);
+		void op_Normf(TWord op);
+		void op_Not(TWord op);
+		void op_Or_SD(TWord op);
+		void op_Or_xx(TWord op);
+		void op_Or_xxxx(TWord op);
+		void op_Ori(TWord op);
+		void op_Pflush(TWord op);
+		void op_Pflushun(TWord op);
+		void op_Pfree(TWord op);
+		void cachePlock(TWord _effectiveAddress);
+		void op_Plock(TWord op);
+		void op_Plockr(TWord op);
+		void op_Punlock(TWord op);
+		void op_Punlockr(TWord op);
+		void op_Rep_ea(TWord op);
+		void op_Rep_aa(TWord op);
+		void op_Rep_xxx(TWord op);
+		void op_Rep_S(TWord op);
+		void op_Reset(TWord op);
+		void op_Rnd(TWord op);
+		void op_Rol(TWord op);
+		void op_Ror(TWord op);
+		void op_Rti(TWord op);
+		void op_Rts(TWord op);
+		void op_Sbc(TWord op);
+		void op_Stop(TWord op);
+		void op_Sub_SD(TWord op);
+		void op_Sub_xx(TWord op);
+		void op_Sub_xxxx(TWord op);
+		void op_Subl(TWord op);
+		void op_Subr(TWord op);
+		void op_Tcc_S1D1(TWord op);
+		void op_Tcc_S1D1S2D2(TWord op);
+		void op_Tcc_S2D2(TWord op);
+		void op_Tfr(TWord op);
+		void op_Trap(TWord op);
+		void op_Trapcc(TWord op);
+		void op_Tst(TWord op);
+		void op_Vsl(TWord op);
+		void op_Wait(TWord _op);
+		void op_ResolveCache(TWord op);
+		void op_Parallel(TWord op);
+
+		// ------------- function permutations -------------
+		static TInstructionFunc resolvePermutation(Instruction _inst, TWord _op);
+
+		// ------------- operation helper methods -------------
+
+		// Check Condition
+		template <Instruction I> int checkCondition(TWord op) const;
+
+		// Effective Address
+		template<Instruction Inst, std::enable_if_t<hasFields<Inst,Field_MMM, Field_RRR>()>* = nullptr>
+		TWord effectiveAddress(TWord op);
+
+		template<Instruction Inst, std::enable_if_t<hasFieldT<Inst,Field_aaaaaaaaaaaa>()>* = nullptr>
+		TWord effectiveAddress(TWord op) const;
+
+		template<Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_a, Field_RRR>() && hasFieldT<Inst,Field_aaaaaa>()>* = nullptr>
+		TWord effectiveAddress(TWord op) const;
+
+		template<Instruction Inst, std::enable_if_t<has3Fields<Inst,Field_aaaaaa, Field_a, Field_RRR>()>* = nullptr>
+		TWord effectiveAddress(TWord op) const;
+
+		// Relative Address Offset
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaa, Field_aaaaa>()>* = nullptr>
+		int relativeAddressOffset(TWord op) const;
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_RRR>()>* = nullptr> 
+		int relativeAddressOffset(TWord op) const;
+
+		// Memory Read
+		template <Instruction Inst, std::enable_if_t<!hasFieldT<Inst,Field_s>() && has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>* = nullptr>
+		TWord readMem(TWord op);
+
+		template <Instruction Inst, std::enable_if_t<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
+		TWord readMem(TWord op, EMemArea area);
+
+		template <Instruction Inst, TWord MMM, std::enable_if_t<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
+		TWord readMem(TWord op, EMemArea area);
+
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaaaaaaaa>()>* = nullptr>
+		TWord readMem(TWord op, EMemArea area) const;
+
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaa>()>* = nullptr>
+		TWord readMem(TWord op, EMemArea area) const;
+
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaaaa, Field_S>()>* = nullptr>
+		TWord readMem(TWord op) const;
+
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>* = nullptr> TWord readMem(TWord op) const;
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>* = nullptr> TWord readMem(TWord op) const;
+
+		// MOVE(M), shared by the effective address and the absolute short address forms
+		template <Instruction Inst> void movem(TWord op);
+
+		// MOVEP between P memory and an I/O address, shared by the high (pp) and the low (qq) address forms
+		template <Instruction Inst> void movep_Pea(TWord op, EMemArea _periphArea, TWord _periphAddress);
+
+		// MPYI, MPYRI, MACI and MACRI: a register times the immediate extension word, accumulated and/or rounded
+		template <Instruction Inst> void alu_mpyImmediate(TWord op, bool _accumulate, bool _round);
+
+		// Memory Write
+		template <Instruction Inst, std::enable_if_t<has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>* = nullptr>
+		void writeMem(TWord op, TWord value);
+
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
+		void writeMem(TWord op, EMemArea area, TWord value);
+
+		template <Instruction Inst, TWord MMM, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
+		void writeMem(TWord op, EMemArea area, TWord value);
+
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaaaaaaaa>()>* = nullptr>
+		void writeMem(TWord op, EMemArea area, TWord value);
+
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaa>()>* = nullptr>
+		void writeMem(TWord op, EMemArea area, TWord value);
+
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaaaa, Field_S>()>* = nullptr>
+		void writeMem(TWord op, TWord value);
+
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>* = nullptr> void writeMem(TWord op, TWord value);
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>* = nullptr> void writeMem(TWord op, TWord value);
+
+		// bit manipulation
+		template <Instruction Inst> bool bitTest(TWord op, TWord toBeTested)
+		{
+			const auto bit = getBit<Inst>(op);
+			return dsp56k::bittest<TWord>(toBeTested, bit);
+		}
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_bbbbb, Field_S>()>* = nullptr> bool bitTestMemory(TWord op);
+
+		// extension word access
+		template<Instruction Inst> TWord absAddressExt()
+		{
+			static_assert(g_opcodes[Inst].m_extensionWordType & AbsoluteAddressExt, "opcode does not have an absolute address extension word");
+			return fetchOpWordB();
+		}
+
+		template<Instruction Inst> TWord immediateDataExt()
+		{
+			// TODO: it would be better to check for extension word type & ImmediateDataExt but as there is code that is not compiled at compile time, we can't do that yet
+			static_assert(g_opcodes[Inst].m_extensionWordType, "opcode does not have an immediate data extension word");
+			return fetchOpWordB();
+		}
+
+		template<Instruction Inst> int pcRelativeAddressExt()
+		{
+			static_assert(g_opcodes[Inst].m_extensionWordType & PCRelativeAddressExt, "opcode does not have a PC-relative address extension word");
+			return signextend<int,24>(fetchOpWordB());
+		}
+
+		// -------------- bra variants
+		template<BraMode Bmode> void braOrBsr(int offset);
+
+		template<Instruction Inst, BraMode Bmode> void braIfCC(TWord op);
+
+		template<Instruction Inst, BraMode Bmode> void braIfCC(TWord op, int offset);
+
+		template<Instruction Inst, BraMode Bmode, ExpectedBitValue BitValue> void braIfBitTestMem(TWord op);
+		template<Instruction Inst, BraMode Bmode, ExpectedBitValue BitValue> void braIfBitTestDDDDDD(TWord op);
+
+		// -------------- jmp variants
+		template<JumpMode Jsr> void jumpOrJSR(TWord ea);
+
+		template<Instruction Inst, JumpMode Jsr>
+		void jumpIfCC(TWord op);
+
+		template<Instruction Inst, JumpMode Jsr>
+		void jumpIfCC(TWord op, TWord ea);
+		
+		template<Instruction Inst, JumpMode Jsr, ExpectedBitValue BitValue> void jumpIfBitTestMem(TWord op);
+		template<Instruction Inst, JumpMode Jsr, ExpectedBitValue BitValue> void jumpIfBitTestDDDDDD(TWord op);
+
+		// -------------- move helper
+		template<Instruction Inst, EMemArea Area, TWord W> void move_ddddd_absAddr(TWord _op);
+		template<Instruction Inst, EMemArea Area, TWord W, TWord MMM> void move_ddddd_MMMRRR(TWord op);
+		template<Instruction Inst> void move_L(TWord op);
+		template<Instruction Inst, EMemArea Area> void move_Rnxxxx(TWord op);
+		
+		// --- debugging tools
+	private:
+		void errNotImplemented(const char* _opName);
+		void updatePreviousRegisterStates();
+	public:
+		void coreDump(std::stringstream& _dst);
+		void coreDump();
+	};
+}

@@ -1,0 +1,85 @@
+diff --git a/source/dsp56kEmu/esaiclock.cpp b/source/dsp56kEmu/esaiclock.cpp
+index 35bed5f9..0238d627 100644
+--- a/source/dsp56kEmu/esaiclock.cpp
++++ b/source/dsp56kEmu/esaiclock.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "esaiclock.h"
+ 
+ #include <ios>
+@@ -27,10 +28,15 @@ namespace dsp56k
+ 
+ 		auto diff = *m_dspInstructionCounter - m_lastClock;
+ 
+-		if(diff < m_cyclesPerSample)
+-			return instructionsForCycles(static_cast<uint32_t>(m_cyclesPerSample - diff));
++		const uint32_t slot = slotLength();
+ 
+-		m_lastClock += m_cyclesPerSample;
++		if(diff < slot)
++			return instructionsForCycles(static_cast<uint32_t>(slot - diff));
++
++		m_lastClock += slot;
++		m_slotAcc += m_slotRem;
++		if(m_slotAcc >= m_slotDen)
++			m_slotAcc -= m_slotDen;
+ 
+ 		auto advanceClock = [](Clock& _c)
+ 		{
+@@ -213,6 +219,8 @@ namespace dsp56k
+ 	void EsxiClock::updateCyclesPerSample()
+ 	{
+ 		uint32_t cyclesPerSample = m_fixedCyclesPerSample;
++		bool scaled = false;	// the samplerate path applies the speed percentage exactly itself
++		m_slotRem = 0; m_slotDen = 1; m_slotAcc = 0;
+ 
+ 		if(!cyclesPerSample)
+ 		{
+@@ -228,12 +236,25 @@ namespace dsp56k
+ 			m_speedHz = static_cast<uint64_t>(m_externalClockFrequency) * static_cast<uint64_t>(mf) / (static_cast<uint64_t>(pd) * static_cast<uint64_t>(df));
+ 
+ 			if (m_samplerate)
+-				cyclesPerSample = static_cast<uint32_t>((m_speedHz / m_samplerate) >> 1);	// 2 samples = 1 frame (stereo)
++			{
++				// 2 samples = 1 frame (stereo). Whole cycles here, the remainder is carried in exec().
++				const uint64_t num = m_speedHz * m_speedPercent / 100;
++				m_slotDen = static_cast<uint64_t>(m_samplerate) * 2;
++				m_slotRem = num % m_slotDen;
++				if(const char* e = std::getenv("MS2K_ESAIFRAC"); e && e[0] == 'o' && e[1] == 'f')	// A/B: the truncated slot
++					m_slotRem = 0;
++				m_slotAcc = 0;
++				cyclesPerSample = static_cast<uint32_t>(num / m_slotDen);
++				scaled = true;
++			}
+ 			else
+ 				cyclesPerSample = mf * 128 / pd;			// The ratio between external clock and sample period simplifies to this.
+ 
+-			cyclesPerSample *= m_speedPercent;
+-			cyclesPerSample /= 100;
++			if(!scaled)
++			{
++				cyclesPerSample *= m_speedPercent;
++				cyclesPerSample /= 100;
++			}
+ 
+ 			// A more full expression would be m_cyclesPerSample = dsp_frequency / samplerate, where
+ 			// dsp_frequency = m_extClock * mf / pd and samplerate = m_extClock/256
+diff --git a/source/dsp56kEmu/esaiclock.h b/source/dsp56kEmu/esaiclock.h
+index c65b6f53..1ff8cfa9 100644
+--- a/source/dsp56kEmu/esaiclock.h
++++ b/source/dsp56kEmu/esaiclock.h
+@@ -83,6 +83,14 @@ namespace dsp56k
+ 		const uint64_t* m_dspInstructionCounter = nullptr;
+ 		uint64_t m_lastClock = 0;
+ 		uint32_t m_cyclesPerSample = 2133;				// estimated cycles per sample before calculated
++		// MS2000 (2026-09-26): the slot period is core / (2 x samplerate), which is not a whole number of cycles
++		// (99979636 / 96000 = 1041.45). Truncated, the ESAI ran 48021 frames per second against a board fs of
++		// 48000 - every ~1/21 s the transmitter found its registers not yet refilled and sent the previous word
++		// again. The remainder is carried (m_slotRem / m_slotDen) so the average slot is exact.
++		uint64_t m_slotRem = 0;
++		uint64_t m_slotDen = 1;
++		uint64_t m_slotAcc = 0;
++		uint32_t slotLength() const { return m_cyclesPerSample + ((m_slotAcc + m_slotRem >= m_slotDen) ? 1u : 0u); }
+ 
+ 		ClockSource m_clockSource = ClockSource::Instructions;
+ 

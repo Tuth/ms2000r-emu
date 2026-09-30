@@ -1,0 +1,381 @@
+// MS2000R VST3 editor (phase 2, VST3-2). See PluginEditor.h.
+//
+// The panel is immediate-mode (vector_panel.h): it is walked twice. The INPUT pass runs on every mouse event
+// with a backend that draws nothing and answers item() from the mouse - switches and knobs change there, at
+// once, so a click shorter than a frame still reaches the machine. The DRAW pass runs in paint() with a
+// backend on juce::Graphics whose items are passive (no new presses, no drag), so drawing changes nothing.
+// The timer (30 Hz) reads the LEDs and the LCD and repaints only when something the panel shows changed.
+#include "PluginEditor.h"
+#include <cstring>
+
+namespace {
+constexpr int kTabH = 30;
+const juce::Colour kBg(28, 34, 38);
+
+juce::Colour col(uint32_t c) { return juce::Colour(juce::uint8(c), juce::uint8(c >> 8), juce::uint8(c >> 16), juce::uint8(c >> 24)); }
+
+// the input pass: no drawing, items from the mouse
+struct InputBackend final : VPanel::Backend {
+    Ms2kEditor::Mouse& m;
+    explicit InputBackend(Ms2kEditor::Mouse& mm) : m(mm) {}
+    void rectFilled(VPanel::V2, VPanel::V2, uint32_t, float) override {}
+    void rect(VPanel::V2, VPanel::V2, uint32_t, float, float) override {}
+    void circleFilled(VPanel::V2, float, uint32_t, int) override {}
+    void circle(VPanel::V2, float, uint32_t, int, float) override {}
+    void line(VPanel::V2, VPanel::V2, uint32_t, float) override {}
+    VPanel::V2 textSize(float, const char*) override { return {}; }
+    void text(VPanel::V2, float, uint32_t, const char*) override {}
+    VPanel::Item item(const char* id, VPanel::V2 a, VPanel::V2 b) override
+    {
+        const bool hit = m.inside && m.pos.x >= a.x && m.pos.x < b.x && m.pos.y >= a.y && m.pos.y < b.y;
+        if (m.press && hit && m.active.empty()) m.active = id;
+        VPanel::Item it;
+        it.active = !m.active.empty() && m.active == id;
+        it.hovered = hit && (m.active.empty() || it.active);
+        it.shift = m.shift;
+        it.dblClick = it.hovered && m.dbl;
+        it.dragY = it.active ? m.dragY : 0.0f;
+        it.wheel = it.hovered ? m.wheel : 0.0f;
+        return it;
+    }
+    void tooltip(const char*) override {}
+    void lcd(VPanel::V2, VPanel::V2) override {}
+};
+
+// the draw pass: juce::Graphics, passive items
+struct DrawBackend final : VPanel::Backend {
+    juce::Graphics& g; const Ms2kEditor::Mouse& m; juce::Typeface::Ptr face;
+    std::function<void(juce::Rectangle<float>)> lcdFn;
+    juce::String tip;
+    float fontPx = -1.0f; juce::Font font;
+    // consecutive lines of one colour and width are stroked as ONE path (a pot's 36 knurl lines, its 11 scale
+    // ticks): one edge table instead of one per line
+    juce::Path lines; uint32_t linesCol = 0; float linesW = -1.0f;
+    // which layer this pass draws: 0 = the printed panel (cached as a picture), 1 = what changes, 2 = both
+    int pass = 2; bool dyn = false;
+    bool skip() const { return pass != 2 && (pass == 1) != dyn; }
+    void layer(bool d) override { if (d != dyn) { flush(); dyn = d; } }
+    DrawBackend(juce::Graphics& gg, const Ms2kEditor::Mouse& mm, juce::Typeface::Ptr f) : g(gg), m(mm), face(f), font(14.0f) {}
+    void flush()
+    {
+        if (lines.isEmpty()) return;
+        g.setColour(col(linesCol));
+        g.strokePath(lines, juce::PathStrokeType(linesW));
+        lines.clear();
+    }
+    static juce::Rectangle<float> R(VPanel::V2 a, VPanel::V2 b) { return { a.x, a.y, b.x - a.x, b.y - a.y }; }
+    const juce::Font& fontAt(float px)
+    {
+        if (px != fontPx) { fontPx = px; font = face ? juce::Font(face).withHeight(px) : juce::Font(px, juce::Font::bold); }
+        return font;
+    }
+    void rectFilled(VPanel::V2 a, VPanel::V2 b, uint32_t c, float r) override
+    {
+        if (skip()) return;
+        flush();
+        g.setColour(col(c));
+        if (r > 0.0f) g.fillRoundedRectangle(R(a, b), r); else g.fillRect(R(a, b));
+    }
+    void rect(VPanel::V2 a, VPanel::V2 b, uint32_t c, float r, float t) override
+    {
+        if (skip()) return;
+        flush();
+        g.setColour(col(c));
+        const auto q = R(a, b).reduced(t * 0.5f);
+        if (r > 0.0f) g.drawRoundedRectangle(q, r, t); else g.drawRect(q, t);
+    }
+    void circleFilled(VPanel::V2 c, float r, uint32_t cc, int) override { if (skip()) return; flush(); g.setColour(col(cc)); g.fillEllipse(c.x - r, c.y - r, 2 * r, 2 * r); }
+    void circle(VPanel::V2 c, float r, uint32_t cc, int, float t) override { if (skip()) return; flush(); g.setColour(col(cc)); g.drawEllipse(c.x - r, c.y - r, 2 * r, 2 * r, t); }
+    void line(VPanel::V2 a, VPanel::V2 b, uint32_t c, float t) override
+    {
+        if (skip()) return;
+        if (c != linesCol || t != linesW) { flush(); linesCol = c; linesW = t; }
+        lines.startNewSubPath(a.x, a.y); lines.lineTo(b.x, b.y);
+    }
+    VPanel::V2 textSize(float px, const char* t) override { const auto& f = fontAt(px); return { f.getStringWidthFloat(t), px }; }
+    void text(VPanel::V2 p, float px, uint32_t c, const char* t) override
+    {
+        if (skip()) return;
+        flush();
+        const auto& f = fontAt(px);
+        g.setFont(f); g.setColour(col(c));
+        g.drawSingleLineText(t, int(std::lround(p.x)), int(std::lround(p.y + f.getAscent())));
+    }
+    VPanel::Item item(const char* id, VPanel::V2 a, VPanel::V2 b) override
+    {
+        const bool hit = m.inside && m.pos.x >= a.x && m.pos.x < b.x && m.pos.y >= a.y && m.pos.y < b.y;
+        VPanel::Item it;
+        it.active = !m.active.empty() && m.active == id;
+        it.hovered = hit && (m.active.empty() || it.active);
+        return it;
+    }
+    void tooltip(const char* t) override { tip = t; }
+    void lcd(VPanel::V2 a, VPanel::V2 b) override { if (pass == 0) return; flush(); if (lcdFn) lcdFn(R(a, b)); }
+};
+
+juce::Typeface::Ptr loadPanelFace()
+{
+    // the standalone's panel font: a narrow bold sans from Windows (the same files, the same order)
+    for (const char* p : { "C:\\Windows\\Fonts\\ARIALNB.TTF", "C:\\Windows\\Fonts\\arialbd.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf" }) {
+        juce::MemoryBlock mb;
+        if (juce::File(p).loadFileAsData(mb) && mb.getSize() > 0)
+            if (auto tf = juce::Typeface::createSystemTypefaceFor(mb.getData(), mb.getSize())) return tf;
+    }
+    return {};
+}
+} // namespace
+
+Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
+{
+    m_face = loadPanelFace();
+    // HD44780 A00 character generator, if the local dump is present (thin_gui's loadCgRom: 16 bytes a
+    // character, rows 0-7, 5 low bits). Without it the LCD is drawn as text. The working directory is the
+    // MS2000 folder (the processor set it).
+    for (const char* f : { "hd44780_a00.bin" }) {
+        juce::MemoryBlock mb;
+        if (juce::File::getCurrentWorkingDirectory().getChildFile(f).loadFileAsData(mb) && mb.getSize() >= 4096) {
+            const auto* b = static_cast<const uint8_t*>(mb.getData());
+            for (int c = 0; c < 256; ++c) for (int y = 0; y < 8; ++y) m_cg[c][y] = b[c * 16 + y] & 0x1F;
+            m_cgOk = true;
+        }
+    }
+    setupIo();
+
+    for (auto* b : { &m_tabPanel, &m_tabSettings }) { b->setClickingTogglesState(false); b->setRadioGroupId(0); addAndMakeVisible(*b); }
+    m_tabPanel.onClick = [this] { showTab(0); };
+    m_tabSettings.onClick = [this] { showTab(1); };
+    m_mic2.setToggleState(m_proc.mic2, juce::dontSendNotification);
+    m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
+    m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); };
+    m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); };
+    m_demo.onClick = [this] { if (m_demoPhase == 0) { m_demoPhase = 1; m_demoT0 = juce::Time::getMillisecondCounter(); } };
+    m_help.setText("Panel: drag a knob up / down (Shift = fine), mouse wheel, double-click = centre.\n"
+                   "Shift+click a program key 1-16 or EXIT: it stays held (amber ring) - chords on the pads, or EXIT held while "
+                   "you press GLOBAL (demo songs). Click it again to let it go.\n"
+                   "POWER / VOLUME is the plugin's output level; AUDIO IN 1 / 2 are the input level pots. The host routes "
+                   "its input bus to AUDIO IN 1 (left) and 2 (right).", juce::dontSendNotification);
+    m_help.setJustificationType(juce::Justification::topLeft);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_help, &m_status }) addChildComponent(*c);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_help, &m_status })
+        c->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)), c->setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+
+    setResizable(true, true);
+    setResizeLimits(700, 380, 3840, 2160);
+    const int w = m_proc.editorW >= 700 ? m_proc.editorW : 1400;
+    setSize(w, int(std::lround(w * VPanel::kH / VPanel::kW)) + kTabH);
+    showTab(m_proc.editorTab == 1 ? 1 : 0);
+    if (const char* e = std::getenv("MS2K_EDITORSHOT"); e && *e) { m_shotPath = e; m_testTick = 0; showTab(0); }
+    if (const char* e = std::getenv("MS2K_EDITORTEST"); e && *e) m_testMode = e;
+    startTimerHz(30);
+}
+
+Ms2kEditor::~Ms2kEditor()
+{
+    stopTimer();
+    if (m_demoPhase) { m_proc.setSwitch(3, 6, false); m_proc.setSwitch(4, 0, false); m_demoPhase = 0; }
+    m_io.releaseAll();   // STATED: a key held by the mouse or LATCH is let go when the editor closes
+}
+
+void Ms2kEditor::setupIo()
+{
+    m_io.lit = m_lit; m_io.shown = m_shown; m_io.knobs = m_proc.knobs;
+    m_io.volume = &m_proc.volume; m_io.in1 = &m_proc.in1; m_io.in2 = &m_proc.in2;
+    m_io.sw = [this](unsigned c, unsigned r, bool d) { if (m_demoPhase == 0) m_proc.setSwitch(c, r, d); };
+    m_io.knob = [this](unsigned m, unsigned x, uint16_t v) { m_proc.setKnob(m, x, v); };
+}
+
+void Ms2kEditor::showTab(int t)
+{
+    m_tab = t; m_proc.editorTab = t;
+    m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
+    m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_help, &m_status }) c->setVisible(t == 1);
+    if (t == 1) { m_io.releaseAll(); m_mouse.active.clear(); }
+    m_dirty = true; repaint();
+}
+
+juce::Rectangle<float> Ms2kEditor::panelArea() const
+{
+    const auto a = getLocalBounds().withTrimmedTop(kTabH).toFloat();
+    const float s = juce::jmin(a.getWidth() / VPanel::kW, a.getHeight() / VPanel::kH);
+    return { a.getX() + (a.getWidth() - VPanel::kW * s) * 0.5f, a.getY(), VPanel::kW * s, VPanel::kH * s };
+}
+
+void Ms2kEditor::resized()
+{
+    m_tabPanel.setBounds(6, 4, 90, kTabH - 8);
+    m_tabSettings.setBounds(100, 4, 90, kTabH - 8);
+    auto r = getLocalBounds().withTrimmedTop(kTabH).reduced(24, 16);
+    m_mic2.setBounds(r.removeFromTop(30));
+    m_dac20.setBounds(r.removeFromTop(30));
+    r.removeFromTop(10);
+    m_demo.setBounds(r.removeFromTop(30).withWidth(300));
+    r.removeFromTop(16);
+    m_help.setBounds(r.removeFromTop(110));
+    m_status.setBounds(r.removeFromTop(48));
+    m_proc.editorW = getWidth();
+    m_dirty = true;
+}
+
+// ---- mouse -> the input pass ----
+void Ms2kEditor::runInput()
+{
+    if (m_tab != 0) return;
+    const auto pa = panelArea();
+    InputBackend be(m_mouse);
+    m_io.stageChanged = m_io.volumeChanged = false;
+    VPanel::draw(m_io, be, VPanel::V2(pa.getX(), pa.getY()), VPanel::V2(pa.getWidth(), pa.getHeight()));
+    if (m_io.stageChanged) m_proc.applyInputStage();
+    if (m_io.volumeChanged) m_proc.applyVolume();
+    m_mouse.press = m_mouse.dbl = false; m_mouse.dragY = m_mouse.wheel = 0.0f;
+    m_dirty = true; repaint();
+}
+static VPanel::V2 P(const juce::MouseEvent& e) { return { e.position.x, e.position.y }; }
+void Ms2kEditor::mouseDown(const juce::MouseEvent& e)
+{
+    m_mouse.pos = P(e); m_mouse.inside = true; m_mouse.btn = true; m_mouse.press = true;
+    m_mouse.shift = e.mods.isShiftDown(); m_mouse.lastY = e.position.y; m_mouse.active.clear();
+    runInput();
+}
+void Ms2kEditor::mouseDrag(const juce::MouseEvent& e)
+{
+    m_mouse.pos = P(e); m_mouse.shift = e.mods.isShiftDown();
+    m_mouse.dragY += e.position.y - m_mouse.lastY; m_mouse.lastY = e.position.y;
+    runInput();
+}
+void Ms2kEditor::mouseUp(const juce::MouseEvent& e)
+{
+    m_mouse.pos = P(e); m_mouse.btn = false; m_mouse.active.clear();
+    runInput();
+}
+void Ms2kEditor::mouseMove(const juce::MouseEvent& e) { m_mouse.pos = P(e); m_mouse.inside = true; m_mouse.shift = e.mods.isShiftDown(); m_dirty = true; repaint(); }
+void Ms2kEditor::mouseExit(const juce::MouseEvent&) { m_mouse.inside = false; m_dirty = true; repaint(); }
+void Ms2kEditor::mouseDoubleClick(const juce::MouseEvent& e) { m_mouse.pos = P(e); m_mouse.dbl = true; runInput(); }
+void Ms2kEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+{
+    // one notch = 1.0 as ImGui counts it (JUCE on Windows: 120 wheel units -> deltaY 0.234375)
+    m_mouse.pos = P(e); m_mouse.inside = true; m_mouse.shift = e.mods.isShiftDown();
+    m_mouse.wheel += (w.isReversed ? -w.deltaY : w.deltaY) / 0.234375f;
+    runInput();
+}
+
+void Ms2kEditor::testClick(float px, float py, bool shift)
+{
+    const auto pa = panelArea();
+    const float s = pa.getWidth() / VPanel::kW;
+    m_mouse.pos = VPanel::V2(pa.getX() + px * s, pa.getY() + py * s); m_mouse.inside = true;
+    m_mouse.btn = true; m_mouse.press = true; m_mouse.shift = shift; m_mouse.active.clear();
+    runInput();
+    m_mouse.btn = false; m_mouse.active.clear();
+    runInput();
+    m_mouse.inside = false;
+}
+
+// ---- the timer: LEDs, LCD, demo keys ----
+void Ms2kEditor::timerCallback()
+{
+    if (m_testTick >= 0) {
+        ++m_testTick;
+        if (m_testTick == 60) setSize(1400, int(std::lround(1400.0f * VPanel::kH / VPanel::kW)) + kTabH);
+        if (m_testMode == "latch") {
+            if (m_testTick == 120) testClick(258.0f, 855.0f, true);                   // pad 1
+            if (m_testTick == 130) testClick(258.0f + 101.33f * 4, 855.0f, true);     // pad 5
+            if (m_testTick == 140) testClick(1745.0f, 395.0f, true);                  // EXIT
+        }
+        if (m_testTick == 180) {
+            const float sc = juce::jmax(1.0f, juce::Component::getApproximateScaleFactorForComponent(this));
+            const juce::Image img = createComponentSnapshot(getLocalBounds(), true, sc);
+            juce::File(m_shotPath + ".txt").replaceWithText(m_proc.status() + juce::String::formatted(
+                "\neditor %d x %d (scale %.2f), last panel draw %.1f ms\n", getWidth(), getHeight(), double(sc), m_paintMs));
+            juce::File f(m_shotPath); f.deleteFile();
+            juce::FileOutputStream os(f);
+            juce::PNGImageFormat png;
+            if (os.openedOk()) png.writeImageToStream(img, os);
+            m_testTick = -1;
+        }
+    }
+    if (m_demoPhase) {   // the standalone's demo button: EXIT down, GLOBAL down 200 ms later, both up after 1.4 s
+        const auto dt = juce::Time::getMillisecondCounter() - m_demoT0;
+        if (m_demoPhase == 1) { m_proc.setSwitch(4, 0, true); m_demoPhase = 2; }
+        else if (m_demoPhase == 2 && dt >= 200) { m_proc.setSwitch(3, 6, true); m_demoPhase = 3; }
+        else if (m_demoPhase == 3 && dt >= 1400) { m_proc.setSwitch(3, 6, false); m_proc.setSwitch(4, 0, false); m_demoPhase = 0; }
+    }
+    bool changed = m_dirty;
+    if (auto* r = m_proc.runner()) {
+        const auto leds = r->getEmulator().panelLeds();
+        for (int i = 0; i < 8; ++i) for (int j = 0; j < 12; ++j) {
+            if (std::abs(leds.lit[i][j] - m_lit[i][j]) > 1.0f / 64.0f) changed = true;
+            m_lit[i][j] = leds.lit[i][j];
+        }
+        const LcdGuiSnapshot s = r->getLcdGuiSnapshot();
+        if (std::memcmp(s.line0, m_lcd.line0, sizeof s.line0) || std::memcmp(s.line1, m_lcd.line1, sizeof s.line1) ||
+            std::memcmp(s.cgram, m_lcd.cgram, sizeof s.cgram) || s.displayOn != m_lcd.displayOn) changed = true;
+        m_lcd = s;
+    }
+    if (m_tab == 1) {
+        const juce::String st = m_proc.status() + juce::String::formatted("\npanel draw %.1f ms", m_paintMs);
+        if (st != m_status.getText()) m_status.setText(st, juce::dontSendNotification);
+    }
+    if (changed) { m_dirty = false; repaint(); }
+}
+
+// the backlit LCD glass (thin_gui's drawLcdPanel, on juce::Graphics): 16 x 2 cells of 5 x 8 dots fitted into r,
+// every dot on whole pixels; below 3 px a dot keeps no gap
+void Ms2kEditor::drawLcd(juce::Graphics& g, juce::Rectangle<float> r) const
+{
+    const juce::Colour glass(186, 220, 64), on(26, 38, 16), off(172, 206, 58);
+    g.setColour(glass); g.fillRoundedRectangle(r, 2.0f);
+    const float dot = juce::jmin(r.getWidth() / 101.0f, r.getHeight() / 23.0f);
+    const float ox = std::floor(r.getCentreX() - 47.5f * dot), oy = std::floor(r.getCentreY() - 8.5f * dot);
+    const float gap = dot >= 3.0f ? juce::jmax(1.0f, std::floor(dot * 0.15f + 0.5f)) : 0.0f;
+    for (int ln = 0; ln < 2; ++ln)
+        for (int c = 0; c < 16; ++c) {
+            const uint8_t ch = uint8_t((ln ? m_lcd.line1 : m_lcd.line0)[c]);
+            for (int y = 0; y < 8; ++y) {
+                const uint8_t bits = !m_lcd.displayOn ? 0 : (ch < 16 ? m_lcd.cgram[ch & 7][y] : (m_cgOk ? m_cg[ch][y] : 0));
+                const float y0 = std::floor(oy + (ln * 9 + y) * dot), y1 = std::floor(oy + (ln * 9 + y + 1) * dot) - gap;
+                for (int x = 0; x < 5; ++x) {
+                    const float x0 = std::floor(ox + (c * 6 + x) * dot), x1 = std::floor(ox + (c * 6 + x + 1) * dot) - gap;
+                    g.setColour(((bits >> (4 - x)) & 1) ? on : off);
+                    g.fillRect(x0, y0, x1 - x0, y1 - y0);
+                }
+            }
+            if (!m_cgOk && m_lcd.displayOn && ch >= 0x20 && ch < 0x7F) {
+                g.setColour(on); g.setFont(juce::Font(8.0f * dot, juce::Font::bold));
+                g.drawText(juce::String::charToString(juce::juce_wchar(ch)), juce::Rectangle<float>(ox + c * 6 * dot, oy + ln * 9 * dot, 5 * dot, 8 * dot),
+                           juce::Justification::centred, false);
+            }
+        }
+}
+
+void Ms2kEditor::paint(juce::Graphics& g)
+{
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    g.fillAll(kBg);
+    if (m_tab == 1) { g.setColour(col(VPanel::cPanel())); g.fillRect(getLocalBounds().withTrimmedTop(kTabH)); return; }
+    const auto pa = panelArea();
+    // the printed panel as a picture at the display's pixel scale, redrawn only when the size changes
+    const float ps = juce::jmax(1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const int iw = juce::roundToInt(float(getWidth()) * ps), ih = juce::roundToInt(float(getHeight()) * ps);
+    if (!m_static.isValid() || m_static.getWidth() != iw || m_static.getHeight() != ih) {
+        m_static = juce::Image(juce::Image::ARGB, iw, ih, true);
+        juce::Graphics sg(m_static);
+        sg.addTransform(juce::AffineTransform::scale(ps));
+        DrawBackend sb(sg, m_mouse, m_face); sb.pass = 0;   // the same passive items as the draw pass: no key changes
+        VPanel::draw(m_io, sb, VPanel::V2(pa.getX(), pa.getY()), VPanel::V2(pa.getWidth(), pa.getHeight()));
+        sb.flush();
+    }
+    g.drawImageTransformed(m_static, juce::AffineTransform::scale(1.0f / ps));
+    DrawBackend be(g, m_mouse, m_face); be.pass = 1;
+    be.lcdFn = [this, &g](juce::Rectangle<float> r) { drawLcd(g, r); };
+    VPanel::draw(m_io, be, VPanel::V2(pa.getX(), pa.getY()), VPanel::V2(pa.getWidth(), pa.getHeight()));
+    be.flush();
+    if (be.tip.isNotEmpty() && m_mouse.inside) {   // the knob's value
+        const juce::Font f(14.0f);
+        const float w = f.getStringWidthFloat(be.tip) + 12.0f;
+        const juce::Rectangle<float> r(m_mouse.pos.x + 14.0f, m_mouse.pos.y + 16.0f, w, 20.0f);
+        g.setColour(juce::Colour(20, 22, 26).withAlpha(0.92f)); g.fillRoundedRectangle(r, 3.0f);
+        g.setColour(juce::Colour(236, 242, 244)); g.setFont(f); g.drawText(be.tip, r, juce::Justification::centred, false);
+    }
+    m_paintMs = juce::Time::getMillisecondCounterHiRes() - t0;
+}

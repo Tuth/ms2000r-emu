@@ -1,0 +1,39 @@
+diff --git a/source/dsp56kEmu/dsp.cpp b/source/dsp56kEmu/dsp.cpp
+index 8eaa288..aebf5b2 100644
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -156,6 +156,18 @@ namespace dsp56k
+ 		m_jit.resetHW();
+ 	}
+ 
++	void DSP::resetPin()
++	{
++		const auto instructions = m_instructions;
++		const auto cycles = m_cycles;
++		resetHW();
++		m_instructions = instructions;
++		m_cycles = cycles;
++		m_pendingInterrupts.clear();
++		m_processingMode = Default;
++		m_interruptFunc = m_execPeripheralsFunc;
++	}
++
+ 	void DSP::execInterrupts()
+ 	{
+ 		if(m_interruptPriorityFunc)
+diff --git a/source/dsp56kEmu/dsp.h b/source/dsp56kEmu/dsp.h
+index 24fe8e2..e6592a2 100644
+--- a/source/dsp56kEmu/dsp.h
++++ b/source/dsp56kEmu/dsp.h
+@@ -418,6 +418,11 @@ namespace dsp56k
+ 			return _addr >= XIO_Reserved_High_First;
+ 		}
+ 
++		// MS2000 DSP-RESET: the RESET pin went low and back high while the part was running. resetHW() plus what
++		// it leaves out for a running core: pending interrupts are dropped and the processing mode is back to
++		// normal. The instruction and cycle counters keep counting (the peripherals are clocked by them).
++		void resetPin();
++
+ 		void fastForward(const TWord _instructions, const TWord _cycles)
+ 		{
+ 			m_instructions += _instructions;

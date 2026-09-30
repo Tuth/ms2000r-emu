@@ -1,0 +1,7 @@
+{
+  "name": "ms2000r-emu",
+  "version-string": "0.1.0",
+  "dependencies": [
+    { "name": "imgui", "features": [ "win32-binding", "dx11-binding" ] }
+  ]
+}

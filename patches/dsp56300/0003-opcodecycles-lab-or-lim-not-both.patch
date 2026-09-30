@@ -1,0 +1,25 @@
+diff --git a/source/dsp56kEmu/opcodecycles.cpp b/source/dsp56kEmu/opcodecycles.cpp
+index 1152069a..41b12232 100644
+--- a/source/dsp56kEmu/opcodecycles.cpp
++++ b/source/dsp56kEmu/opcodecycles.cpp
+@@ -65,8 +65,18 @@ namespace dsp56k
+ 				c += cycles.pru;
+ 				break;
+ 			case MMM_AbsAddr:
+-				c += cycles.lab;
+-				c += cycles.lim;
++				{
++					/*	MMM = 110 is two modes told apart by RRR: 000 Absolute Address, 100 Immediate Data
++						(DSP56300FM rev.5 section 4.4.4, printed p.4-8). Table A-1's "+ lab" is added for the Long
++						Absolute Address mode and "+ lim" for the long immediate data mode (printed p.A-1/A-2),
++						so an instruction pays one of them, never both. Adding both counted every long absolute
++						or long immediate move one cycle too many.
++					*/
++					TWord rrr = 0;
++					if(hasField(_inst, Field_RRR))
++						rrr = getFieldValue(_inst, Field_RRR, _op);
++					c += (rrr == (MMMRRR_ImmediateData & 7)) ? cycles.lim : cycles.lab;
++				}
+ 				break;
+ 			default:
+ 				break;

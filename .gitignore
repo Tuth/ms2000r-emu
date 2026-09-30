@@ -1,0 +1,16 @@
+# build output
+build*/
+out/
+.vs/
+# NEVER in this repository: firmware, ROM dumps, manuals, your machine's state
+*.bin
+*.sys
+*.rom
+*.sectors
+*.nvram
+*.pdf
+full FW/
+thin_gui.ini
+dumps/
+*.wav
+*.log

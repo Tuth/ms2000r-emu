@@ -1,0 +1,249 @@
+diff --git a/source/dsp56kEmu/dma.cpp b/source/dsp56kEmu/dma.cpp
+index 0d7ad8f9..7ebdf6f1 100644
+--- a/source/dsp56kEmu/dma.cpp
++++ b/source/dsp56kEmu/dma.cpp
+@@ -1,5 +1,8 @@
+ #include "dma.h"
+ 
++#include <algorithm>
++#include <cstdlib>
++
+ // DSP56300FM.pdf chapter 10 (page 181 ff)
+ 
+ #include "dsp.h"
+@@ -265,6 +268,22 @@ namespace dsp56k
+ 		if(m_pendingTransfer <= 0)
+ 			return IPeripherals::MaxDelayCycles;
+ 
++		if(m_requestDelay)
++		{
++			// a request-triggered block in flight, timed in core cycles (see triggerByRequest). The peripherals are
++			// clocked in instructions, and an instruction is at least one cycle, so ask again after half the rest
++			const auto now = coreClock();
++			if(now >= m_doneAtCycle)
++			{
++				m_requestDelay = false;
++				m_pendingTransfer = 0;
++				finishTransfer();
++				return IPeripherals::MaxDelayCycles;
++			}
++			m_pendingTransfer = static_cast<int32_t>(m_doneAtCycle - now);
++			return std::max(1u, static_cast<uint32_t>(m_pendingTransfer) >> 1);
++		}
++
+ 		const auto clock = m_peripherals.getDSP().getInstructionCounter();
+ 		const auto diff = clock - m_lastClock;
+ 		m_lastClock = clock;
+@@ -288,6 +307,14 @@ namespace dsp56k
+ 		return m_pendingTransfer;
+ 	}
+ 
++	uint64_t DmaChannel::coreClock() const
++	{
++		// core clock cycles. An interpreter in a JIT build does not count them (dsp.cpp: if constexpr(!g_useJIT)), but it
++		// counts instructions, and an instruction takes at least one cycle, so the larger of the two keeps time in both
++		const auto& dsp = m_peripherals.getDSP();
++		return std::max<uint64_t>(dsp.getCycles(), dsp.getInstructionCounter());
++	}
++
+ 	void DmaChannel::triggerByRequest()
+ 	{
+ 		if(!bittest(m_dcr, De))
+@@ -302,6 +329,19 @@ namespace dsp56k
+ 		if(!m_dsrWritten || !m_ddrWritten)
+ 			return;
+ 
++		// VOCODER-1: a request that arrives while this channel's previous block is still in flight completes that one
++		// first, as the channel cannot hold two
++		if(m_requestDelay)
++		{
++			m_requestDelay = false;
++			m_pendingTransfer = 0;
++			finishTransfer();
++			if(!bittest(m_dcr, De))
++				return;
++		}
++
++		m_words = 0;
++
+ 		// In block mode one request moves the whole block. execTransfer() returns false after each word in the
+ 		// address modes that it moves word by word, so keep calling it until the block is done
+ 		if(getTransferMode() == TransferMode::BlockTriggerRequestClearDE)
+@@ -315,7 +355,34 @@ namespace dsp56k
+ 			return;
+ 		}
+ 
+-		finishTransfer();
++		/*	MS2000 VOCODER-1 (2026-09-26). DSP56300FM rev.5 section 10.2, RENDERED p.185 (printed 10-5): "each word
++			transfer performed by the DMA takes at least two core clock cycles" (source read, destination write, plus
++			any external wait states); 10.2.1, RENDERED p.185-186: "Data movement can never be performed by more than
++			one DMA channel within a given core clock cycle" - the channels share one DMA address and data bus. So a
++			triggered block is done (DE cleared, DTD set, end-of-block interrupt) 2 x words core cycles after the DMA
++			data path is free, not at the trigger. The words themselves still move at the trigger, as for DE triggered
++			blocks above (stated approximation: only firmware that reads the destination before the interrupt could
++			tell). STATED: external wait states are not added (the minimum); channel priorities are not modelled -
++			blocks complete in trigger order. MEASURED on the MS2000: with the done interrupt at the trigger, the voice
++			DMA chain's interrupt (P:$22 -> $3A8) nested inside the routine that had not yet stored its table pointer
++			(P:$51F jsr $500 / P:$521 move r7,y:(r6)), so two of the three tables ran twice every sample: five
++			transfers and four interrupts instead of three and two. MS2K_DMATIME=off completes at the trigger (A/B).
++		*/
++		static const bool atTrigger = [] { const char* e = std::getenv("MS2K_DMATIME"); return e && e[0] == 'o' && e[1] == 'f'; }();
++		if(atTrigger)
++		{
++			finishTransfer();
++			return;
++		}
++
++		const auto now = coreClock();
++		const auto start = std::max(now, m_dma.getEngineFreeAt(now));
++		m_doneAtCycle = start + 2ull * std::max<uint32_t>(m_words, 1);
++		m_dma.setEngineFreeAt(m_doneAtCycle, now);
++		m_requestDelay = true;
++		m_pendingTransfer = static_cast<int32_t>(m_doneAtCycle - now);
++		m_dma.setActiveChannel(m_index);
++		m_peripherals.setDelayCycles(std::max(1u, static_cast<uint32_t>(m_pendingTransfer) >> 1));
+ 	}
+ 
+ 	DmaChannel::TransferMode DmaChannel::getTransferMode() const
+@@ -386,6 +453,7 @@ namespace dsp56k
+ 
+ 	void DmaChannel::memCopy(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const
+ 	{
++		struct WordCount { uint32_t& w; const uint32_t end; ~WordCount() { w = end; } } wordCount{m_words, m_words + _count};	// one per word, whichever copy path runs
+ 		if(_dstAddr >= m_peripherals.getDSP().memory().getBridgedMemoryAddress())
+ 			_dstArea = MemArea_P;
+ 
+@@ -428,6 +496,7 @@ namespace dsp56k
+ 
+ 	void DmaChannel::memFill(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const
+ 	{
++		struct WordCount { uint32_t& w; const uint32_t end; ~WordCount() { w = end; } } wordCount{m_words, m_words + _count};	// one per word, whichever copy path runs
+ 		const auto readMultiple = isPeripheralAddr(_srcArea, _srcAddr);
+ 
+ 		if(_dstAddr >= m_peripherals.getDSP().memory().getBridgedMemoryAddress())
+@@ -469,6 +538,7 @@ namespace dsp56k
+ 
+ 	void DmaChannel::memCopyToFixedDest(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const
+ 	{
++		struct WordCount { uint32_t& w; const uint32_t end; ~WordCount() { w = end; } } wordCount{m_words, m_words + _count};	// one per word, whichever copy path runs
+ 		TWord srcAddr = _srcAddr;
+ 
+ 		for (TWord i = 0; i < _count; ++i)
+@@ -571,6 +641,7 @@ namespace dsp56k
+ 
+ 	void DmaChannel::memWrite(EMemArea _area, TWord _addr, TWord _value) const
+ 	{
++		++m_words;
+ 		auto& dsp = m_peripherals.getDSP();
+ 		if (isPeripheralAddr(_area, _addr))
+ 			dsp.getPeriph(_area)->write(_addr | 0xff0000, _value);
+@@ -858,6 +929,28 @@ namespace dsp56k
+ 		return m_dstr;
+ 	}
+ 
++	void DmaChannel::reset()
++	{
++		m_dsr = m_ddr = m_dco = m_dcr = 0;
++		m_dsrWritten = m_ddrWritten = m_armed = false;
++		m_dcoh = m_dcom = m_dcol = m_dcohInit = m_dcomInit = m_dcolInit = 0;
++		m_pendingTransfer = 0;
++		m_dataTransferred = false;
++		m_requestDelay = false;
++		m_words = 0;
++	}
++
++	void Dma::reset()
++	{
++		for (auto& c : m_channels)
++			c.reset();
++		for (auto& t : m_requestTargets)
++			t.clear();
++		m_dor = {0,0,0,0};
++		m_dstr = (1 << Dtd0) | (1 << Dtd1) | (1 << Dtd2) | (1 << Dtd3) | (1 << Dtd4) | (1 << Dtd5);
++		m_engineFreeAt = m_engineSetAt = 0;
++	}
++
+ 	void Dma::setDOR(const TWord _index, const TWord _value)
+ 	{
+ 		m_dor[_index] = _value;
+diff --git a/source/dsp56kEmu/dma.h b/source/dsp56kEmu/dma.h
+index c4b0c4bd..f5597790 100644
+--- a/source/dsp56kEmu/dma.h
++++ b/source/dsp56kEmu/dma.h
+@@ -126,6 +126,8 @@ namespace dsp56k
+ 		uint32_t exec();
+ 
+ 		void triggerByRequest();
++		void reset();	// MS2000 DSP-RESET: registers and state as after a hardware reset
++		uint64_t coreClock() const;
+ 
+ 		TransferMode getTransferMode() const;
+ 		TWord getPriority() const;
+@@ -189,6 +191,12 @@ namespace dsp56k
+ 		int32_t m_pendingTransfer = 0;
+ 		bool m_dataTransferred = false;
+ 		uint64_t m_lastClock = 0;
++
++		// MS2000 VOCODER-1: a request-triggered block completes (DE, DTD, interrupt) after its word transfers, in core
++		// clock cycles, not at the trigger (DSP56300FM rev.5 10.2/10.2.1, RENDERED p.185-186)
++		mutable uint32_t m_words = 0;		// words moved by the transfer in progress
++		uint64_t m_doneAtCycle = 0;
++		bool m_requestDelay = false;
+ 	};
+ 
+ 	class Dma
+@@ -210,6 +218,10 @@ namespace dsp56k
+ 
+ //		void setDSTR(TWord _value);
+ 		const TWord& getDSTR() const;
++		void reset();	// MS2000 DSP-RESET: every channel idle, DCR/DSR/DDR/DCO/DOR = 0, DTD set, no request targets
++		// the DMA data path is free from this core cycle on; a value set before the core's cycle count went back (a reset) is stale
++		uint64_t getEngineFreeAt(const uint64_t _now) const { return _now < m_engineSetAt ? _now : m_engineFreeAt; }
++		void setEngineFreeAt(const uint64_t _c, const uint64_t _now) { m_engineFreeAt = _c; m_engineSetAt = _now; }
+ 
+ 		void setDOR(TWord _index, TWord _value);
+ 		TWord getDOR(TWord _index) const;
+@@ -238,6 +250,8 @@ namespace dsp56k
+ 		TWord m_dstr;
+ 		std::array<DmaChannel, 6> m_channels;
+ 		std::array<TWord, 4> m_dor{};
++		uint64_t m_engineSetAt = 0;
++		uint64_t m_engineFreeAt = 0;	// VOCODER-1: the one DMA data path is busy until this core cycle (FM 10.2.1)
+ 		std::array<ChannelList, static_cast<uint32_t>(DmaChannel::RequestSource::Count)> m_requestTargets;
+ 	};
+ }
+diff --git a/source/dsp56kEmu/unittests.cpp b/source/dsp56kEmu/unittests.cpp
+index ab3dd8dc..462bcdc4 100644
+--- a/source/dsp56kEmu/unittests.cpp
++++ b/source/dsp56kEmu/unittests.cpp
+@@ -1975,8 +1975,30 @@ namespace dsp56k
+ 
+ 		verify(dsp.memory().get(MemArea_Y, 0x600) == 0);
+ 
++		for(TWord i=0; i<64; ++i)
++			emitToMemory("nop", 0xe00 + i);
++		emitToMemory(0x0c0e40, 0, 0xe40);	// jmp $e40, the JIT runs whole blocks, it has to end somewhere
++
++		// FM rev.5 10.2 (RENDERED p.185): a word transfer takes at least two core cycles, and 10.2.1: one channel at a
++		// time. Channel 0's words are there at once (as for DE triggered blocks), but its block is done - DE cleared,
++		// and the "transfer done" that requests channel 1 - only 8 cycles later
+ 		dma.trigger(DmaChannel::RequestSource::ExternalIRQD);
+ 
++		for(TWord i=0; i<4; ++i)
++			verify(dsp.memory().get(MemArea_Y, 0x600 + i) == 0x180 + i);
++		verify(dsp.memory().get(MemArea_Y, 0x604) == 0);
++		verify((peripheralsX.read(XIO_DCR0, Nop) & (1 << 23)) != 0);
++
++		auto runCycles = [&]()
++		{
++			dsp.setPC(0xe00);
++			execUntil(0xe40);
++			dma.exec();
++		};
++
++		runCycles();		// channel 0 done -> channel 1 requested
++		runCycles();		// channel 1 done
++
+ 		for(TWord i=0; i<6; ++i)
+ 			verify(dsp.memory().get(MemArea_Y, 0x600 + i) == 0x180 + i);
+ 		verify(dsp.memory().get(MemArea_Y, 0x606) == 0);

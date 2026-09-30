@@ -1,0 +1,106 @@
+#pragma once
+
+#include <set>
+
+#include "interrupts.h"
+#include "jitblock.h"
+#include "jitblockinfo.h"
+#include "types.h"
+
+namespace dsp56k
+{
+	class JitBlock;
+
+	class JitBlockRuntimeData final
+	{
+	public:
+		friend class JitBlock;
+
+		static constexpr TWord SingleOpCacheIgnoreWordB = 0xffffffff;
+
+		struct InstructionProfilingInfo
+		{
+			TWord pc = 0;
+			TWord opA = 0, opB = 0;	// used for delayed disasm
+			TWord opLen = 0;
+			TWord lineCount = 1;
+			asmjit::Label labelBefore, labelAfter;
+			uint64_t codeOffset = 0;
+			uint64_t codeOffsetAfter = 0;
+			std::string sourceText;
+		};
+
+		JitBlockRuntimeData() = default;
+		~JitBlockRuntimeData();
+
+		const std::string& getDisasm() const { return m_dspAsm; }
+		TWord getLastOpSize() const { return m_lastOpSize; }
+
+		uint64_t getSingleOpCacheKey() const
+		{
+			return getSingleOpCacheKey(m_singleOpWordA, getPMemSize() == 1 ? SingleOpCacheIgnoreWordB : m_singleOpWordB);
+		}
+
+		void setGenerating(bool _generating)
+		{
+			m_generating = _generating;
+		}
+
+		static uint64_t getSingleOpCacheKey(TWord _opA, TWord _opB);
+
+		TWord getChild() const { return m_child; }
+		TWord getNonBranchChild() const { return m_nonBranchChild; }
+		size_t codeSize() const { return m_codeSize; }
+		const std::set<TWord>& getParents() const { return m_parents; }
+
+		// true if, after this block has run to a ret(), the PC in memory is correct - either because this block stored it,
+		// or because every exit transfers to a child that does. Used to drop dead PC stores, see JitBlock::emit
+		bool establishesPc() const { return m_establishesPc; }
+		void setEstablishesPc(const bool _v) { m_establishesPc = _v; }
+		void clearParents() { m_parents.clear(); }
+
+		TWord getPCFirst() const { return m_info.pc; }
+		TWord getPMemSize() const { return m_info.memSize; }
+		TWord getPCNext() const { return getPCFirst() + getPMemSize(); }
+
+		bool isFastInterrupt() const { return getPCFirst() < Vba_End; }
+
+		void finalize(const TJitFunc& _func, const asmjit::CodeHolder& _codeHolder);
+
+		const TJitFunc& getFunc() const { return m_func; }
+
+		// while the block is generated, these are the counts of the instructions generated so far
+		TWord& getEncodedInstructionCount() { return m_encodedInstructionCount; }
+		TWord& getEncodedCycleCount() { return m_encodedCycles; }
+
+		std::vector<InstructionProfilingInfo>& getProfilingInfo() { return m_profilingInfo; }
+		size_t getCodeSize() const { return m_codeSize; }
+
+		const JitBlockInfo& getInfo() const { return m_info; }
+
+		void reset();
+
+	private:
+		void addParent(TWord _pc);
+
+		TJitFunc m_func = nullptr;
+
+		TWord m_lastOpSize = 0;
+		TWord m_singleOpWordA = 0;
+		TWord m_singleOpWordB = 0;
+		TWord m_encodedInstructionCount = 0;
+		TWord m_encodedCycles = 0;
+
+		std::string m_dspAsm;
+		TWord m_child = g_invalidAddress;			// JIT block that we call
+		TWord m_nonBranchChild = g_invalidAddress;
+		size_t m_codeSize = 0;
+
+		JitBlockInfo m_info;
+
+		std::set<TWord> m_parents;
+		bool m_establishesPc = false;
+		bool m_generating = false;
+		std::vector<InstructionProfilingInfo> m_profilingInfo;
+	};
+}

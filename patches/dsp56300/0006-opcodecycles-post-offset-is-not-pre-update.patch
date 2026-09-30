@@ -1,0 +1,34 @@
+diff --git a/source/dsp56kEmu/opcodecycles.cpp b/source/dsp56kEmu/opcodecycles.cpp
+index 41b1223..2b9a2fa 100644
+--- a/source/dsp56kEmu/opcodecycles.cpp
++++ b/source/dsp56kEmu/opcodecycles.cpp
+@@ -1,6 +1,8 @@
+ #include "opcodecycles.h"
+ 
+ #include <iterator>
++#include <cstdlib>
++#include <cstring>
+ 
+ #include "opcodes.h"
+ #include "registers.h"
+@@ -58,8 +60,18 @@ namespace dsp56k
+ 
+ 			switch (eaMode)
+ 			{
+-			case MMM_RnMinusNn:			// 000 (Rn)-Nn	
+-			case MMM_RnPlusNn:			// 001 (Rn)+Nn	
++			/*	DSP56300FM rev.5 RENDERED p.425 (printed A-1): T is for "the Post-Update mode (post-increment,
++				post-decrement and post offset by N) or the No-Update mode"; "+ pru" is for "the pre-update
++				addressing modes (pre-decrement and offset by N addressing modes)". RENDERED p.75 (printed 4-7):
++				(Rn)+Nn and (Rn)-Nn are Post-Increment/Post-Decrement By Offset Nn, (Rn+Nn) is Indexed By Offset
++				Nn and -(Rn) is Pre-Decrement By One. So only 101 and 111 pay pru; charging it for 000/001 too
++				counted every (Rn)+Nn / (Rn)-Nn move one cycle too many (MS2000 VOCODER-1).
++			*/
++			case MMM_RnMinusNn:			// 000 (Rn)-Nn: post-update, pru only in the legacy A/B model
++			case MMM_RnPlusNn:			// 001 (Rn)+Nn: post-update, pru only in the legacy A/B model
++				{ static const bool legacy = [] { const char* e = std::getenv("MS2K_PRUPOST"); return e && std::strcmp(e, "legacy") == 0; }();
++				  if (legacy) c += cycles.pru; }
++				break;
+ 			case MMM_RnPlusNnNoUpdate:	// 101 (Rn+Nn)	
+ 			case MMM_MinusRn:			// 111 -(Rn)
+ 				c += cycles.pru;

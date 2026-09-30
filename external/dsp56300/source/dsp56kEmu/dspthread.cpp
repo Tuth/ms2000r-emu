@@ -1,0 +1,233 @@
+#include "dspthread.h"
+
+#include <cassert>
+#include <chrono>
+#include <iostream>
+
+#include "debuggerinterface.h"
+#include "dsp.h"
+#include "dsp56kBase/threadtools.h"
+
+#if DSP56300_DEBUGGER
+#include "dsp56kDebugger/debugger.h"
+#endif
+
+namespace dsp56k
+{
+	void defaultCallback(uint32_t)
+	{
+	}
+
+	DSPThread::DSPThread(DSP& _dsp, const char* _name/* = nullptr*/, std::shared_ptr<DebuggerInterface> _debugger/* = {}*/, ThreadPriority _initialPriority/* = ThreadPriority::Highest*/, const Callback& _callback/* = {}*/)
+		: m_dsp(_dsp)
+		, m_name(_name ? _name : std::string())
+		, m_initialPriority(_initialPriority)
+		, m_runThread(true)
+		, m_debugger(std::move(_debugger))
+	{
+#ifdef _WIN32
+		m_logToStdout = true;
+#endif
+		if(m_debugger)
+			setDebugger(m_debugger.get());
+
+		setCallback(_callback ? _callback : defaultCallback);
+
+#ifdef _WIN32
+		m_thread.reset(new std::thread([this]
+		{
+			threadFunc();
+		}));
+#else
+		// The JIT compiles on this thread and emits nested child blocks recursively, which takes about 20 KB of
+		// stack per level; a Virus TI firmware reached 27 levels. A std::thread gets the platform default, which
+		// is only 512 KB on macOS, so the DSP thread overflowed into its guard page there. Ask for the 8 MB that
+		// Linux hands out by default.
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+
+		const auto result = pthread_create(&m_thread, &attr, [](void* _this) -> void*
+		{
+			static_cast<DSPThread*>(_this)->threadFunc();
+			return nullptr;
+		}, this);
+
+		pthread_attr_destroy(&attr);
+
+		m_threadStarted = result == 0;
+		assert(m_threadStarted && "failed to create DSP thread");
+#endif
+	}
+
+	DSPThread::~DSPThread()
+	{
+		join();
+	}
+
+	void DSPThread::join()
+	{
+#ifdef _WIN32
+		if(!m_thread)
+			return;
+#else
+		if(!m_threadStarted)
+			return;
+#endif
+
+		if(m_debugger)
+			detachDebugger(m_debugger.get());
+
+		terminate();
+
+#ifdef _WIN32
+		m_thread->join();
+		m_thread.reset();
+#else
+		pthread_join(m_thread, nullptr);
+		m_threadStarted = false;
+#endif
+
+		m_debugger.reset();
+	}
+
+	void DSPThread::terminate()
+	{
+		m_runThread = false;
+
+		m_dsp.terminate();
+	}
+
+	void DSPThread::setCallback(const Callback& _callback)
+	{
+		const Callback c = _callback ? _callback : defaultCallback;
+
+		Guard g(m_mutex);
+		m_callback = c;
+	}
+
+	void DSPThread::setDebugger(DebuggerInterface* _debugger)
+	{
+		std::lock_guard lock(m_debuggerMutex);
+		if(m_nextDebugger)
+			m_nextDebugger->setDspThread(nullptr);
+		m_nextDebugger = _debugger;
+		if(m_nextDebugger)
+			m_nextDebugger->setDspThread(this);
+	}
+
+	void DSPThread::detachDebugger(const DebuggerInterface* _debugger)
+	{
+		std::lock_guard lock(m_debuggerMutex);
+		if(m_nextDebugger == _debugger)
+			setDebugger(nullptr);
+	}
+
+	void DSPThread::threadFunc()
+	{
+		ThreadTools::setCurrentThreadPriority(m_initialPriority);
+		ThreadTools::setCurrentThreadName(m_name.empty() ? "DSP" : "DSP " + m_name);
+
+		uint64_t instructions = 0;
+		uint64_t cycles = 0;
+		uint64_t counter = 0;
+
+		uint64_t totalInstructions = 0;
+		uint64_t totalCycles = 0;
+
+		using Clock = std::chrono::high_resolution_clock;
+
+		auto t = Clock::now();
+		const auto tStart = t;
+
+#ifdef _DEBUG
+		constexpr size_t ipsStep = 0x0400000;
+#else
+		constexpr size_t ipsStep = 0x2000000;
+#endif
+		while(m_runThread)
+		{
+			{
+				Guard g(m_mutex);
+
+				const auto iBegin = m_dsp.getInstructionCounter();
+				const auto cBegin = m_dsp.getCycles();
+
+				if constexpr(g_useJIT)
+				{
+					// the trampoline runs the whole batch: it saves the callee-saved registers that blocks
+					// use once here instead of once per block
+					m_dsp.getJit().getTrampoline().exec(&m_dsp, 128);
+				}
+				else
+				{
+					for(size_t i=0; i<128; i += 8)
+					{
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+						m_dsp.exec();
+					}
+				}
+				const auto iEnd = m_dsp.getInstructionCounter();
+				const auto cEnd = m_dsp.getCycles();
+
+				const auto di = iEnd - iBegin;
+				const auto dc = cEnd - cBegin;
+
+				instructions += di;
+				totalInstructions += di;
+
+				cycles += dc;
+				totalCycles += dc;
+
+				counter += 128;
+
+				m_callback(static_cast<uint32_t>(di));
+
+#if DSP56300_DEBUGGER
+				m_dsp.setDebugger(m_nextDebugger);
+#endif
+			}
+
+			if((counter & (ipsStep-1)) == 0)
+			{
+				const auto t2 = Clock::now();
+				const auto d = t2 - t;
+				const auto dTotal = t2 - tStart;
+
+				const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(d);
+				const auto msTotal = std::chrono::duration_cast<std::chrono::microseconds>(dTotal);
+
+				m_currentMips = static_cast<double>(instructions) / static_cast<double>(ms.count());
+				m_averageMips = static_cast<double>(totalInstructions) / static_cast<double>(msTotal.count());
+
+				m_currentMcps = static_cast<double>(cycles) / static_cast<double>(ms.count());
+				m_averageMcps = static_cast<double>(totalCycles) / static_cast<double>(msTotal.count());
+
+				instructions = 0;
+				cycles = 0;
+
+				t = t2;
+
+				if(!m_name.empty())
+					snprintf(m_mipsString, std::size(m_mipsString), "[%s] MIPS: %.4f (%.4f avg), MHz: %.4f (%.4f avg)", m_name.c_str(), m_currentMips, m_averageMips, m_currentMcps, m_averageMcps);
+				else
+					snprintf(m_mipsString, std::size(m_mipsString), "MIPS: %.4f (%.4f avg), MHz: %.4f (%.4f avg)", m_currentMips, m_averageMips, m_currentMcps, m_averageMcps);
+
+				if(m_logToStdout)
+					puts(m_mipsString);
+				if(m_logToDebug)
+					LOG(m_mipsString);
+			}
+		}
+
+		m_dsp.setDebugger(m_nextDebugger);
+
+		m_runThread = true;
+	}
+}

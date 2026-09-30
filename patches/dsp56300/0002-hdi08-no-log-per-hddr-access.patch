@@ -1,0 +1,20 @@
+diff --git a/source/dsp56kEmu/hdi08.cpp b/source/dsp56kEmu/hdi08.cpp
+index 526fd83f..38f0bf4d 100644
+--- a/source/dsp56kEmu/hdi08.cpp
++++ b/source/dsp56kEmu/hdi08.cpp
+@@ -242,13 +242,13 @@ namespace dsp56k
+ 
+ 	TWord HDI08::readHDDR() const
+ 	{
+-		LOG("Read HDDR: " << HEX(m_hdr));
++//		LOG("Read HDDR: " << HEX(m_hdr));   // MS2000 BUG125: read per PB0 edge, a stringstream each time
+ 		return m_hddr;
+ 	}
+ 
+ 	void HDI08::writeHDDR(TWord _val)
+ 	{
+-		LOG("Write HDDR: " << HEX(_val));
++//		LOG("Write HDDR: " << HEX(_val));
+ 		m_hddr = _val;
+ 	}
+ 
