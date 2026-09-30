@@ -30,8 +30,8 @@ Next: a preset library page.
 Windows builds are on the [Releases](../../releases) page: `ms2000_emulator.exe` with its two launchers and the
 `MS2000R.vst3` plugin. Put your ROM files (below) beside the exe, or in a folder above it, and start
 `MS2000R.bat` (or `MS2000R (log).bat` to get `ms2000_gui.log` for a bug report). Copy `MS2000R.vst3` to your
-VST3 folder (usually `C:\Program Files\Common Files\VST3`) and point `MS2K_HOME` at the folder with the ROMs,
-or keep the plugin in a folder below it. The Microsoft Visual C++ 2015-2022 x64 runtime is needed.
+VST3 folder (usually `C:\Program Files\Common Files\VST3`); on its first start open Settings -> "Choose the
+MS2000 folder..." and pick the folder with the ROMs (remembered in `%APPDATA%\MS2000R\home.txt`). The Microsoft Visual C++ 2015-2022 x64 runtime is needed.
 
 ## What you need - NOT included
 
