@@ -757,6 +757,7 @@ public:
     // i16.txt Minimum Viable IRQ system
     static constexpr int MAX_VEC = 256;
     std::bitset<MAX_VEC> m_irq_pending;
+    uint32_t m_irqPendingCount = 0;   // PERF-MCU-10: == m_irq_pending.count(); irqRaise/irqClear are the only writers (bitset::any() looped over 4 words, 2.4 % of the MCU profile)
     bool m_irq_in_service = false;
     uint32_t m_tpu2_tick_accum = 0;   // TPU2 TGI2A periodic-tick cycle accumulator (timer IRQ)
     bool m_tpu2_started = false;      // set when firmware writes TSTR.CST2 (0xFFFFC0 bit2)
@@ -1211,7 +1212,7 @@ private:
     // mode changes) and reset() bump m_dcacheGen; a DRAM write into a page holding cached code bumps
     // that page's generation and the previous page's (an instruction is up to 10 bytes long).
     // MS2K_DCACHE=off decodes every instruction afresh (A/B).
-    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu; uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; uint8_t fk = 0; uint8_t raw[10] = {}; H8S2350Instruction insn; };
+    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu; uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; uint8_t fk = 0; uint8_t raw[10] = {}; H8S2350InstructionExecutor::DirectFn fn = nullptr; H8S2350Instruction insn; };
     // PERF-MCU-1 (2026-10-01): the executors re-read their own instruction bytes through readByte()
     // (opcode, register fields, immediates, absolute addresses) - the whole bus path per byte. The
     // cache entry now keeps the bytes it decoded; while the instruction executes, readByte() answers
@@ -1219,6 +1220,7 @@ private:
     // and from the moment a flash bus write or a DRAM write into a code page happens (conservative).
     const uint8_t* m_decodeRaw = nullptr;             // set by decodeCached(): the entry's bytes, or null
     uint8_t m_decodeFk = 0;                           // PERF-MCU-3: fused kind of the entry (0 = executor)
+    H8S2350InstructionExecutor::DirectFn m_decodeFn = nullptr;   // PERF-MCU-6: the handler for FK_CALL
     static uint8_t fusedKind(const H8S2350Instruction& insn, const uint8_t* raw);
     const uint8_t* m_insnRaw = nullptr;
     bool m_insnRawOn = false;

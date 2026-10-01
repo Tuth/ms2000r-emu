@@ -41,6 +41,7 @@ extern bool g_h8s_quiet_boot;   // h8s2350_instructions.cpp (global namespace) -
 uint64_t g_ms2kTickNowCalls = 0;   // PERF-MCU: tickPeripheralsNow() calls, MS2K_OPHIST report
 uint64_t g_ms2kTickWhy[3] = {}, g_ms2kBudgetLog2[32] = {}, g_ms2kBudgetWhoN[32] = {};
 int g_ms2kBudgetWho = 0;
+static uint64_t g_ms2kOp2Hist[65536] = {};
 static const bool g_ms2kOpHist = [] { const char* e = std::getenv("MS2K_OPHIST"); return e && *e; }();
 // BUG71: forward declaration - reset() uses this above its definition.
 // It lives in namespace MS2000, like ms2kTpu2Mode() beside it.
@@ -272,6 +273,13 @@ H8S2350Emulator::~H8S2350Emulator()
         printf("[OPHIST] batch ends: budget %llu, irq pending %llu, other event %llu; new budget log2:", (unsigned long long)g_ms2kTickWhy[0],
                (unsigned long long)g_ms2kTickWhy[1], (unsigned long long)g_ms2kTickWhy[2]);
         for (int b = 0; b < 32; ++b) if (g_ms2kBudgetLog2[b]) printf(" %d:%llu", b, (unsigned long long)g_ms2kBudgetLog2[b]);
+        {   // PERF-MCU: the first two bytes, top 60 (lean path only)
+            std::vector<std::pair<uint64_t,int>> w; uint64_t t2 = 0;
+            for (int i = 0; i < 65536; ++i) if (g_ms2kOp2Hist[i]) { w.push_back({g_ms2kOp2Hist[i], i}); t2 += g_ms2kOp2Hist[i]; }
+            std::sort(w.rbegin(), w.rend());
+            printf("\n[OPHIST2]");
+            for (size_t i = 0; i < w.size() && i < 60; ++i) printf(" %04X:%.2f", w[i].second, 100.0 * double(w[i].first) / double(tot ? tot : 1));
+        }
         printf("\n[OPHIST] budget set by (1 sci1rx 2 sci1tx 3 sci0tx 4 adc 5 dmac-pace 6 dsp-fs 7 tpu 11 rxline 13 sci0-load 16 dsp-nobatch):");
         for (int b = 0; b < 32; ++b) if (g_ms2kBudgetWhoN[b]) printf(" %d:%llu", b, (unsigned long long)g_ms2kBudgetWhoN[b]);
         printf("\n");
@@ -1058,6 +1066,11 @@ static const bool g_ms2kCycAudit = ms2kAnyEnv({ "MS2K_CYCAUDIT" });
 // BUG130: MS2K_CYCLEGACY=1 - shifts not ticked, executor-added states kept in m_cycles (the pre-BUG130 clocks)
 static const bool g_ms2kCycLegacy = ms2kAnyEnv({ "MS2K_CYCLEGACY" });
 
+static const bool g_ms2kLeanStep = [] {   // PERF-MCU-8; MS2K_SLOWEXEC=1 also turns it off
+    const char* k = std::getenv("MS2K_KICKSTART");
+    const char* sx = std::getenv("MS2K_SLOWEXEC");
+    return !g_ms2kBootDiag && !ms2kIrqHack() && !(k && *k && *k != '0') && !(sx && *sx && *sx != '0');
+}();
 void H8S2350Emulator::step()
 {
     g_ms2kPhase = "step-entry";
@@ -1077,6 +1090,10 @@ void H8S2350Emulator::step()
         printf("[DEBUG] H8S2350Emulator::step() called for first time\n");
     }
     static uint32_t step_50k = 50000;   // PERF-135: a countdown instead of a division per instruction
+    static bool irq_masked_logged = false;     // PERF-MCU-8: these four were declared further down; hoisted so the
+    static uint32_t stub_update_counter = 0;   // lean path below shares them with the full one
+    static uint32_t rtc_update_counter = 0;
+    static uint32_t diag_counter = 0;
     if (--step_50k == 0) {
         step_50k = 50000;
         if (ms2kBootDiag()) printf("[DEBUG] Step count: %u, PC=0x%06X\n", step_count, m_registers.pc);   // PERF-129
@@ -1092,6 +1109,42 @@ void H8S2350Emulator::step()
         }
     }
     
+
+    // PERF-MCU-8 (2026-10-01): the lean step - everything below this point that can change state, in the same
+    // order, without the BOOTDIAG / IRQ_HACK / KICKSTART stations (it is taken only when all three are off;
+    // checkKickStart() still runs on the first step for its one "disabled" line) and the phase markers.
+    if (g_ms2kLeanStep) {
+        if (hasPendingInterrupt()) {
+            if (cpuInterruptsEnabled()) {
+                handleInterrupts();
+            } else if (!irq_masked_logged) {
+                irq_masked_logged = true;
+                printf("[IRQ-MASKED] a request is pending but masked: EXR=0x%02X (T=%d, mask level=%d)\n",
+                       m_registers.exr & 0xFF, (m_registers.exr >> 7) & 1, m_registers.exr & 0x07);
+            }
+        }
+        m_effectivePC = m_registers.pc;
+        executeInstructionFast();
+        m_cycles_executed++;
+        m_stackTaint.currentCycle = m_cycles_executed;
+        if ((++stub_update_counter & 63u) == 0u && m_mp_stub) {
+            m_mp_stub->update(64);
+            if ((++rtc_update_counter & 511u) == 0u) {
+                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                m_mp_stub->updateRTC(static_cast<uint32_t>(seconds - 946684800LL));
+            }
+        }
+        if (m_replay_mode) syncReplay();
+        if (m_clock_cycles_per_step > 1) updateClockSystem();
+        if (step_count == 1) checkKickStart();
+        if (++diag_counter == 1000) { diag_counter = 0;
+            g_diag.setCpuFlags((m_registers.exr & 0x80) ? 1 : 0, (m_registers.ccr & 0x80) ? 1 : 0);
+            g_diag.setIrqInService(m_irq_in_service);
+        }
+        if ((m_irqPendingCount != 0)) irqTryService();
+        return;
+    }
+
     // Controlled IRQ re-activation after stack protection is established
     // BUG71: the step-1000 poke. ONE THOUSAND is an arbitrary constant with no
     // hardware meaning - the real machine lowers its own mask with LDC/ANDC on
@@ -1110,7 +1163,6 @@ void H8S2350Emulator::step()
             handleInterrupts();
         } else {
             // BUG71: one-shot, and it now names the bit it is actually reporting.
-            static bool irq_masked_logged = false;
             if (!irq_masked_logged) {
                 irq_masked_logged = true;
                 printf("[IRQ-MASKED] a request is pending but masked: EXR=0x%02X (T=%d, mask level=%d)\n",
@@ -1133,7 +1185,6 @@ void H8S2350Emulator::step()
     
     // Update MP stub (CPU → MP → LCD architecture) — rate-limited like syncDSP()
     // Every 64 steps to prevent 100× slowdown from inner-loop speedup
-    static uint32_t stub_update_counter = 0;
     if ((++stub_update_counter & 63u) == 0u) {  // every 64 steps
         if (m_mp_stub) {
             m_mp_stub->update(64); // 64 cycles worth
@@ -1141,7 +1192,6 @@ void H8S2350Emulator::step()
             // Update RTC from system clock every ~1 second (64 steps * 64 steps ≈ 4096 steps)
             // Actually update RTC every 64 stub updates (every ~4096 CPU cycles at 20MHz ≈ 0.2ms)
             // Better: use a separate counter for RTC
-            static uint32_t rtc_update_counter = 0;
             if ((++rtc_update_counter & 511u) == 0u) {  // every 512 * 64 steps ≈ 0.2s at 20MHz
                 // Get current system time and convert to seconds since 2000-01-01
                 auto now = std::chrono::system_clock::now();
@@ -1409,7 +1459,6 @@ void H8S2350Emulator::step()
 
     }
     // i17.txt: Update CPU flag diagnostics periodically
-    static uint32_t diag_counter = 0;
     if (++diag_counter == 1000) { diag_counter = 0; // Every 1000 steps (PERF-135: no division)
         uint8_t exrI = (m_registers.exr & 0x80) ? 1 : 0;  // EXR.I bit 7
         uint8_t ccrI = (m_registers.ccr & 0x80) ? 1 : 0;  // CCR.I bit 7
@@ -1418,7 +1467,7 @@ void H8S2350Emulator::step()
     }
 
     // i16.txt: Try to service interrupts at end of each step
-    if (m_irq_pending.any()) irqTryService();   // PERF-MCU-2: the early-out without the call
+    if ((m_irqPendingCount != 0)) irqTryService();   // PERF-MCU-2: the early-out without the call
 }
 
 void H8S2350Emulator::execute(uint32_t cycles)
@@ -4423,7 +4472,7 @@ void H8S2350Emulator::tpgStep(uint32_t cycles)
         }
     }
     #undef MS2K_TPG_TICKS
-    if (m_irq_pending.any()) irqTryService();
+    if ((m_irqPendingCount != 0)) irqTryService();
 }
 
 // TPU REGISTER WRITE LOG (2026-09-13). Every write to a channel-2/4 TPU register,
@@ -5582,7 +5631,7 @@ void H8S2350Emulator::tickPeripherals(uint32_t cycles)
     if (!g_ms2kPeriphBatch || m_peripheral) { tickPeripheralsNow(cycles); return; }
     if (g_ms2kOpHist) {   // PERF-MCU diag (MS2K_OPHIST): why the batch ends
         if (!(cycles < m_perBudget)) ++g_ms2kTickWhy[0];
-        else if (m_irq_pending.any()) ++g_ms2kTickWhy[1];
+        else if ((m_irqPendingCount != 0)) ++g_ms2kTickWhy[1];
         else if (peripheralEventNow()) ++g_ms2kTickWhy[2];
     }
     if (cycles < m_perBudget && !peripheralEventNow()) {
@@ -5614,7 +5663,7 @@ void H8S2350Emulator::peripheralsSync()
 
 bool H8S2350Emulator::peripheralEventNow() const
 {
-    if (m_irq_pending.any()) return true;                                     // tpgStep services it
+    if ((m_irqPendingCount != 0)) return true;                                     // tpgStep services it
     if ((m_sci[0].SCR & 0x40) && (m_sci[0].SCR & 0x10) && (m_sci[0].SSR & 0x40)) return true;   // RXI0 level
     if (m_midiSchedIdx < m_midiSched.size() && m_cycles >= m_midiSched[m_midiSchedIdx].atCycle) return true;
     if (m_midiInHostPending.load(std::memory_order_relaxed)) return true;
@@ -6084,7 +6133,7 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
         m_decodeScratch = m_decoder.decode(*this, pc);
         m_decodeOp0 = readByte(pc);
         m_decodeRaw = nullptr;                    // PERF-MCU-1: no byte window on this path
-        m_decodeFk = 0;
+        m_decodeFk = 0; m_decodeFn = nullptr;
         return m_decodeScratch;
     }
     if (m_dcache.empty()) {
@@ -6095,12 +6144,13 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
     DecodeCacheEntry& e = m_dcache[(pc >> 1) & (DCACHE_SIZE - 1)];
     const uint32_t pg = dram ? ((pc - 0x400000u) >> 8) : 0;
     const uint32_t pgen = dram ? m_dramPageGen[pg] : 0;
-    if (e.pc == pc && e.gen == m_dcacheGen && e.pageGen == pgen) { m_decodeOp0 = e.op0; m_decodeRaw = e.raw; m_decodeFk = e.fk; return e.insn; }
+    if (e.pc == pc && e.gen == m_dcacheGen && e.pageGen == pgen) { m_decodeOp0 = e.op0; m_decodeRaw = e.raw; m_decodeFk = e.fk; m_decodeFn = e.fn; return e.insn; }
     e.insn = m_decoder.decode(*this, pc);
     e.op0 = m_decodeOp0 = readByte(pc);
     for (uint32_t k = 0; k < 10u; ++k) e.raw[k] = k < e.insn.size ? readByte(pc + k) : uint8_t(0);   // PERF-MCU-1
     m_decodeRaw = e.raw;
     e.fk = m_decodeFk = fusedKind(e.insn, e.raw);   // PERF-MCU-3
+    e.fn = m_decodeFn = (e.fk == 4) ? H8S2350InstructionExecutor::directHandler(e.insn.opcode) : nullptr;   // PERF-MCU-6
     e.pc = pc; e.gen = m_dcacheGen; e.pageGen = pgen;
     if (dram) {                                   // this page and the one the tail may reach
         m_dramCodePage[pg] = 1;
@@ -6131,7 +6181,7 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
 // updateLastExec - and only for exactly the decodes the dispatch would send to those bodies
 // (decoded primary == first byte, sizes 2/2/4, no DAA/ADDX mnemonic). Cycles are the decoded
 // baseCycles either way (the executor's own addCycles are discarded by the caller).
-enum : uint8_t { FK_NONE = 0, FK_NOP = 1, FK_BCC8 = 2, FK_BCC16 = 3 };
+enum : uint8_t { FK_NONE = 0, FK_NOP = 1, FK_BCC8 = 2, FK_BCC16 = 3, FK_CALL = 4 };   // FK_CALL: PERF-MCU-6
 uint8_t H8S2350Emulator::fusedKind(const H8S2350Instruction& insn, const uint8_t* raw)
 {
     const std::string& m = insn.mnemonic;
@@ -6139,6 +6189,7 @@ uint8_t H8S2350Emulator::fusedKind(const H8S2350Instruction& insn, const uint8_t
     if (insn.size == 2 && raw[0] == 0x00 && raw[1] == 0x00 && insn.opcode == 0x00) return FK_NOP;
     if (insn.size == 2 && raw[0] >= 0x40 && raw[0] <= 0x4F && insn.opcode == raw[0]) return FK_BCC8;
     if (insn.size == 4 && raw[0] == 0x58 && insn.opcode == 0x58) return FK_BCC16;
+    if (H8S2350InstructionExecutor::directHandler(insn.opcode)) return FK_CALL;   // PERF-MCU-6: routed by decoded opcode alone
     return FK_NONE;
 }
 static inline bool ms2kCcTake(const H8SFlags& f, unsigned cc)
@@ -6172,7 +6223,21 @@ void H8S2350Emulator::executeInstructionFast()
         executeInstruction();
         return;
     }
-    const H8S2350Instruction& insn = decodeCached(pc0);
+    // PERF-MCU-9: decodeCached()'s hit path in place (same tests - this PC is flash or DRAM by the gate above -
+    // and the same members set); a miss, or anything decodeCached() would not cache, goes through it.
+    const H8S2350Instruction* ip = nullptr;
+    if (!g_ms2kDcacheOff && !m_read_byte_cb && !m_dcache.empty()) {
+        const bool dram = pc0 >= 0x400000u;
+        if (dram || m_flash_rom.mode() == FlashROM::Mode::READ_ARRAY) {
+            DecodeCacheEntry& e = m_dcache[(pc0 >> 1) & (DCACHE_SIZE - 1)];
+            const uint32_t pgen = dram ? m_dramPageGen[(pc0 - 0x400000u) >> 8] : 0;
+            if (e.pc == pc0 && e.gen == m_dcacheGen && e.pageGen == pgen) {
+                m_decodeOp0 = e.op0; m_decodeRaw = e.raw; m_decodeFk = e.fk; m_decodeFn = e.fn;
+                ip = &e.insn;
+            }
+        }
+    }
+    const H8S2350Instruction& insn = ip ? *ip : decodeCached(pc0);
     const uint32_t size = insn.size;
     if (size != 2 && size != 4 && size != 6 && size != 8 && size != 10) { executeInstruction(); return; }
     const uint8_t op0 = m_decodeOp0;
@@ -6203,15 +6268,19 @@ void H8S2350Emulator::executeInstructionFast()
         m_pc_history_idx = (m_pc_history_idx + 1 == 10) ? 0 : m_pc_history_idx + 1;
     }
     m_dbg_last.prev = m_dbg_last.start;
-    m_opcode_hit_count[op0]++;
+    if (g_ms2kOpHist) m_opcode_hit_count[op0]++;   // PERF-MCU-10: its only readers are MS2K_OPHIST / DIFFREF_HIST
     }
+    if (g_ms2kOpHist && m_decodeRaw) ++g_ms2kOp2Hist[uint32_t(op0) << 8 | m_decodeRaw[1]];   // PERF-MCU: 2-byte histogram
     m_registers.pc = (pc0 + size) & 0x00FFFFFF;
     const uint64_t cyc0 = m_cycles;
     m_busInExec = g_ms2kBusData != 0; m_busRecN = 0; m_busPc0 = pc0 & 0xFFFFFFu; m_busInsnSize = size;
     m_insnRaw = m_decodeRaw;
     m_insnRawOn = m_decodeRaw != nullptr && !g_fifoWatchOn && !g_pcmReadOn;
     uint32_t execCycles;
-    if (m_decodeFk && ::g_h8s_quiet_boot && !g_ms2kFusedOff) {          // PERF-MCU-3
+    if (m_decodeFk == FK_CALL && !g_ms2kFusedOff) {                     // PERF-MCU-6: the handler, without the chain
+        H8S2350InstructionExecutor::executeDirect(m_decodeFn, insn, this);
+        execCycles = insn.baseCycles;
+    } else if (m_decodeFk && ::g_h8s_quiet_boot && !g_ms2kFusedOff) {   // PERF-MCU-3
         const uint8_t* raw = m_decodeRaw;
         switch (m_decodeFk) {
             case FK_BCC8:
@@ -6263,7 +6332,22 @@ void H8S2350Emulator::executeInstructionFast()
         cycles += fetchExtraStates(pc0, size, op0);
     }
     m_cycles = cyc0;
-    tickPeripherals(cycles);
+    // PERF-MCU-9: tickPeripherals()' batching test in place (its body, and peripheralEventNow()'s, inline -
+    // neither was inlined, 8 % of the MCU-only profile between them). Anything else: the call, which tests again.
+    if (g_ms2kPeriphBatch && !m_peripheral && !g_ms2kOpHist && cycles < m_perBudget
+        && !(m_irqPendingCount != 0)
+        && !((m_sci[0].SCR & 0x40) && (m_sci[0].SCR & 0x10) && (m_sci[0].SSR & 0x40))
+        && !(m_midiSchedIdx < m_midiSched.size() && m_cycles >= m_midiSched[m_midiSchedIdx].atCycle)
+        && !m_midiInHostPending.load(std::memory_order_relaxed)) {
+        m_perPend += cycles;
+        m_perBudget -= cycles;
+        if (m_perDmacFast) {
+            m_dmac_pace_accum += cycles;
+            if (m_dmac_pace_accum >= 64) m_dmac_pace_accum = 0;
+        }
+    } else {
+        tickPeripherals(cycles);
+    }
     addCycles(cycles);
 }
 
@@ -13398,7 +13482,7 @@ void H8S2350Emulator::irqRaise(int vec)
         }
     }
     if (vec >= 0 && vec < MAX_VEC) {
-        m_irq_pending.set(vec);
+        if (!m_irq_pending.test(vec)) { m_irq_pending.set(vec); ++m_irqPendingCount; }   // PERF-MCU-10: count kept with the bits
         if (m_trace) printf("[IRQ] Raised vector %d (0x%02X)\n", vec, vec);
     }
     // Replay Debugger: Record IRQ raise
@@ -13410,7 +13494,7 @@ void H8S2350Emulator::irqRaise(int vec)
 void H8S2350Emulator::irqClear(int vec)
 {
     if (vec >= 0 && vec < MAX_VEC) {
-        m_irq_pending.reset(vec);
+        if (m_irq_pending.test(vec)) { m_irq_pending.reset(vec); --m_irqPendingCount; }   // PERF-MCU-10
     }
     // Replay Debugger: Record IRQ clear
     if (m_record_mode && m_replay_logger) {
@@ -13510,7 +13594,7 @@ uint8_t H8S2350Emulator::irqSourceLevel(int vec) const
 void H8S2350Emulator::irqTryService()
 {
     // i16.txt: IRQ service algorithm
-    if (!m_irq_pending.any()) return;
+    if (!(m_irqPendingCount != 0)) return;
 
     int vec = -1;
 

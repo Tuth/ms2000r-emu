@@ -2656,6 +2656,196 @@ namespace MS2000
         return true;
     }
 
+    // PERF-MCU-7 (2026-10-01): moved VERBATIM out of execute(instruction, emulator) so the lean path can call it
+    // directly (directHandler). execute() still reaches it at the same place, through the same condition.
+    bool H8S2350InstructionExecutor::execCmp_RR(const H8S2350Instruction& instruction, H8S2350Emulator* emulator)
+    {
+            auto& regs = emulator->getRegisters();
+            auto& f    = emulator->getFlags();
+            const uint32_t start_pc = instruction.decoded_pc;
+            const uint8_t op2 = emulator->readByte(start_pc + 1);
+            const uint8_t rs = (op2 >> 4) & 0x0F, rd = op2 & 0x0F;
+            if (instruction.opcode == 0x1C) {
+                const uint8_t a = (rd & 8) ? regs.rl[rd & 7] : regs.rh[rd & 7];   // Rd
+                const uint8_t b = (rs & 8) ? regs.rl[rs & 7] : regs.rh[rs & 7];   // Rs
+                const uint8_t r = uint8_t(a - b);
+                f.carry      = b > a;
+                f.half_carry = (b & 0x0F) > (a & 0x0F);
+                f.zero       = r == 0;
+                f.negative   = (r & 0x80) != 0;
+                f.overflow   = (((a ^ b) & (a ^ r)) & 0x80) != 0;
+            } else {
+                const uint16_t a = (rd & 8) ? regs.e[rd & 7] : regs.r[rd & 7];
+                const uint16_t b = (rs & 8) ? regs.e[rs & 7] : regs.r[rs & 7];
+                const uint16_t r = uint16_t(a - b);
+                f.carry      = b > a;
+                f.half_carry = (b & 0x0FFF) > (a & 0x0FFF);
+                f.zero       = r == 0;
+                f.negative   = (r & 0x8000) != 0;
+                f.overflow   = (((a ^ b) & (a ^ r)) & 0x8000) != 0;
+            }
+            emulator->setProgramCounter(pcMask24(start_pc + instruction.size));
+            return true;
+    }
+
+    // PERF-MCU-7 (2026-10-01): moved VERBATIM out of execute(instruction, emulator) so the lean path can call it
+    // directly (directHandler). execute() still reaches it at the same place, through the same condition.
+    bool H8S2350InstructionExecutor::execLogicB_RR(const H8S2350Instruction& instruction, H8S2350Emulator* emulator)
+    {
+                    auto& r = emulator->getRegisters();
+                    auto& f = emulator->getFlags();
+                    const uint32_t at = emulator->getProgramCounter() - instruction.size;
+                    const uint8_t  rs = (uint8_t)instruction.source_operand & 0x0F;
+                    const uint8_t  rd = (uint8_t)instruction.destination_operand & 0x0F;
+                    const uint8_t  a  = (uint8_t)getRegisterValue(r, rd, 0);
+                    const uint8_t  b  = (uint8_t)getRegisterValue(r, rs, 0);
+                    const uint8_t  res = (instruction.opcode == 0x14) ? uint8_t(a | b)
+                                       : (instruction.opcode == 0x15) ? uint8_t(a ^ b)
+                                                                      : uint8_t(a & b);
+                    setRegisterValue(r, rd, res, 0);
+                    f.zero = (res == 0);
+                    f.negative = (res & 0x80) != 0;
+                    f.overflow = false;
+                    if (!g_h8s_quiet_boot) printf("[EXECUTE] 0x%06X: %s R%d%c,R%d%c = 0x%02X\n",
+                           at, (instruction.opcode == 0x14) ? "OR.B" :
+                               (instruction.opcode == 0x15) ? "XOR.B" : "AND.B",
+                           rs & 7, (rs & 8) ? 'L' : 'H', rd & 7, (rd & 8) ? 'L' : 'H', res);
+                    emulator->addCycles(2);
+                    return true;
+    }
+
+    // PERF-MCU-7 (2026-10-01): moved VERBATIM out of execute(instruction, emulator) so the lean path can call it
+    // directly (directHandler). execute() still reaches it at the same place, through the same condition.
+    bool H8S2350InstructionExecutor::execSub_RR(const H8S2350Instruction& instruction, H8S2350Emulator* emulator)
+    {
+                      auto& regs = emulator->getRegisters();
+                      auto& flags = emulator->getFlags();
+                      const uint32_t pc = emulator->getProgramCounter();
+                      const uint8_t spec = emulator->readByte(pc - instruction.size + 1);
+                      const uint8_t rs = (spec >> 4) & 0x0F;
+                      const uint8_t rd = spec & 0x0F;
+
+                      if (instruction.opcode == 0x18) {
+                          const uint8_t src = (rs & 0x08) ? regs.rl[rs & 0x07] : regs.rh[rs & 0x07];   // rendered p.771
+                          const uint8_t dst = (rd & 0x08) ? regs.rl[rd & 0x07] : regs.rh[rd & 0x07];   // rendered p.771
+                          const uint8_t result = static_cast<uint8_t>(dst - src);
+                          // rendered p.771: bit 3 SET = the LOW half
+                          if (rd & 0x08) {
+                              regs.rl[rd & 0x07] = result;
+                              emulator->syncRegAfterByteWrite(rd & 0x07, false);
+                          } else {
+                              regs.rh[rd & 0x07] = result;
+                              emulator->syncRegAfterByteWrite(rd & 0x07, true);
+                          }
+                          flags.zero = (result == 0);
+                          flags.negative = (result & 0x80u) != 0;
+                          flags.carry = (src > dst);
+                          flags.half_carry = (src & 0x0Fu) > (dst & 0x0Fu);   // BUG121: H = borrow at bit 3 (REJ09B0139 RENDERED p.233); it was never written
+                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x80u) != 0;
+                      } else if (instruction.opcode == 0x19) {
+                          // ==========================================================
+                          // BUG83, 2026-09-17 - `SUB.W Rs,Rd` MASKED ITS REGISTER FIELD
+                          // TO THREE BITS. It is FOUR: Appendix A.2's legend, RENDERED
+                          // page 807 (printed "771"), 0000-0111 = R0..R7 and
+                          // 1000-1111 = E0..E7. This is BUG35's defect and BUG73's, a
+                          // fourth time, and this one was on the LIVE BOOT PATH.
+                          //
+                          // MEASURED by TOOL-PCOFFMAP's ring, one dump, no guesswork:
+                          //   0x014608  19 AA   = SUB.W E2,E2
+                          //             ER2 0x00034DBA -> 0x00030000     (R2 cleared)
+                          //             correct:        -> 0x00004DBA     (E2 cleared)
+                          // and the four instructions after it are a jump table:
+                          //   0x01460A  10 72   SHLL.L #2,ER2        index x 4
+                          //   0x01460C  0A B2   ADD.L ER3,ER2        + base 0x0002B2E8
+                          //   0x01460E  01 00 69 23  MOV.L @ER2,ER3  load the pointer
+                          //   0x014614  5D 30   JSR @ER3             call it
+                          // With E2 left standing, the "index" carried 0x0003 in its top
+                          // half, the table read landed at flash 0x0EB2E8 instead, ER3
+                          // came back 0x60F732B0, and the JSR left the memory map -
+                          // which is exactly what [PC-OFFMAP] then reported.
+                          //
+                          // `getRegisterValue`/`setRegisterValue` already implement the
+                          // legend (they are what BUG35 routed 0x79/0x1B/0x0B through)
+                          // and were simply not used here. The 0x18 branch above is
+                          // already four-bit; 0x1A's field really is `0:ers 0:erd`, so
+                          // three bits there is correct. The distinction belongs to the
+                          // encoding, not to taste.
+                          //
+                          // OWED, NOT DONE THIS ROUND: the half-carry. RENDERED page 775
+                          // (printed "739") gives SUB.W as `I- H[3] N* Z* V* C*`, and
+                          // note [3] on RENDERED page 792 (printed "756") is "Set to 1
+                          // when a carry or borrow occurs at bit 11". No branch of this
+                          // handler writes H at all. Left alone deliberately so this
+                          // round's measurement stays attributable to the field fix;
+                          // it is a real gap and it is recorded in the open queue.
+                          // ==========================================================
+                          const uint16_t src = static_cast<uint16_t>(getRegisterValue(regs, rs, 1));
+                          const uint16_t dst = static_cast<uint16_t>(getRegisterValue(regs, rd, 1));
+                          const uint16_t result = static_cast<uint16_t>(dst - src);
+                          setRegisterValue(regs, rd, result, 1);
+                          flags.zero = (result == 0);
+                          flags.negative = (result & 0x8000u) != 0;
+                          flags.carry = (src > dst);
+                          flags.half_carry = (src & 0x0FFFu) > (dst & 0x0FFFu);   // BUG121: H = borrow at bit 11 (REJ09B0139 RENDERED p.235); it was never written
+                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x8000u) != 0;
+                      } else if ((spec & 0x80) != 0) {
+                          // SUB.L ERs,ERd - Renesas H8S/2350 HM Rev 3.00, App A.1,
+                          // RENDERED page 770: "SUB.L ERs,ERd  1 A  1:ers 0:erd".
+                          // BIT 7 MUST BE SET. See the DEC branch below for why.
+                          const uint8_t s = rs & 0x07;
+                          const uint8_t d = rd & 0x07;
+                          const uint32_t src = regs.er[s];
+                          const uint32_t dst = regs.er[d];
+                          const uint32_t result = dst - src;
+                          emulator->setERd(d, result);
+                          flags.zero = (result == 0);
+                          flags.negative = (result & 0x80000000u) != 0;
+                          flags.carry = (src > dst);
+                          flags.half_carry = (src & 0x0FFFFFFFu) > (dst & 0x0FFFFFFFu);   // BUG121: H = borrow at bit 27 (REJ09B0139 RENDERED p.236); it was never written
+                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x80000000u) != 0;
+                      } else if (rs == 0x00) {
+                          // ================================================================
+                          // DEC.B Rd - RENDERED page 763: "DEC.B Rd  1 A  0 rd".
+                          // Operation and flags, RENDERED page 739:
+                          //     Rd8 - 1 -> Rd8
+                          //     I -  H -  N changes  Z changes  V changes  C -
+                          // C AND H ARE UNTOUCHED. SUB.L updates both. Running one as the
+                          // other therefore corrupts the carry as well as the result - the
+                          // same CCR-campaign shape that cost the Virus project a dozen
+                          // rounds.
+                          //
+                          // 2026-09-13: every 0x1A fell into the SUB.L branch above,
+                          // regardless of bit 7. The DECODER already knew better - it sets
+                          // the mnemonic "DEC.B Rd" for this exact case - but nothing ever
+                          // read that mnemonic, so the disassembly and the execution
+                          // disagreed. A probe must report what the code DOES; so must a
+                          // mnemonic.
+                          //
+                          // MEASURED in LOOP-0x11CF0, `1A 02` at 0x011D2E:
+                          //     expected  ER2 FFF7DEEF -> FFF7DDEF   (DEC.B on R2H)
+                          //     actual    ER2 FFF7DEEF -> FFF6DEF1   (ER2 - ER0, ER0=0xFFFE)
+                          // ================================================================
+                          const uint8_t idx  = rd & 0x07;
+                          const bool    high = (rd & 0x08) == 0;   // 0-7 = RnH, 8-15 = RnL
+                          const uint8_t dst    = high ? regs.rh[idx] : regs.rl[idx];
+                          const uint8_t result = static_cast<uint8_t>(dst - 1u);
+                          if (high) regs.rh[idx] = result; else regs.rl[idx] = result;
+                          emulator->syncRegAfterByteWrite(idx, high);
+
+                          flags.zero     = (result == 0);
+                          flags.negative = (result & 0x80u) != 0;
+                          flags.overflow = (dst == 0x80u);   // only 0x80 - 1 overflows
+                          // carry and half_carry: NOT TOUCHED, per the rendered page.
+                      } else {
+                          // Neither form. Say so instead of quietly doing arithmetic -
+                          // a branch that cannot reject is not a branch.
+                          printf("[0x1A-UNKNOWN] spec=0x%02X at PC 0x%06X is neither "
+                                 "SUB.L ERs,ERd (bit7 set) nor DEC.B Rd (high nibble 0)\n",
+                                 spec, pc - instruction.size);
+                      }
+                      return true;
+    }
+
     bool H8S2350InstructionExecutor::execute(const H8S2350Instruction& instruction,
                                             H8S2350Emulator* emulator)
     {
@@ -2685,34 +2875,7 @@ namespace MS2000
         // 0x11 group). It shifted the destination and set the wrong flags; the rest went to
         // executeCompare, which never read Rs. Measured by test_regfield_word before this fix:
         // `1D 34` turned ER4 0x12348000 into 0x048D2000.
-        if (instruction.opcode == 0x1C || instruction.opcode == 0x1D) {
-            auto& regs = emulator->getRegisters();
-            auto& f    = emulator->getFlags();
-            const uint32_t start_pc = instruction.decoded_pc;
-            const uint8_t op2 = emulator->readByte(start_pc + 1);
-            const uint8_t rs = (op2 >> 4) & 0x0F, rd = op2 & 0x0F;
-            if (instruction.opcode == 0x1C) {
-                const uint8_t a = (rd & 8) ? regs.rl[rd & 7] : regs.rh[rd & 7];   // Rd
-                const uint8_t b = (rs & 8) ? regs.rl[rs & 7] : regs.rh[rs & 7];   // Rs
-                const uint8_t r = uint8_t(a - b);
-                f.carry      = b > a;
-                f.half_carry = (b & 0x0F) > (a & 0x0F);
-                f.zero       = r == 0;
-                f.negative   = (r & 0x80) != 0;
-                f.overflow   = (((a ^ b) & (a ^ r)) & 0x80) != 0;
-            } else {
-                const uint16_t a = (rd & 8) ? regs.e[rd & 7] : regs.r[rd & 7];
-                const uint16_t b = (rs & 8) ? regs.e[rs & 7] : regs.r[rs & 7];
-                const uint16_t r = uint16_t(a - b);
-                f.carry      = b > a;
-                f.half_carry = (b & 0x0FFF) > (a & 0x0FFF);
-                f.zero       = r == 0;
-                f.negative   = (r & 0x8000) != 0;
-                f.overflow   = (((a ^ b) & (a ^ r)) & 0x8000) != 0;
-            }
-            emulator->setProgramCounter(pcMask24(start_pc + instruction.size));
-            return true;
-        }
+        if (instruction.opcode == 0x1C || instruction.opcode == 0x1D) { return execCmp_RR(instruction, emulator); }   // PERF-MCU-7: body moved verbatim to execCmp_RR()
 
         // BUG113, 2026-09-24 - THE WHOLE SHIFT/ROTATE SPACE, ONE BODY, OFF THE PAGE.
         //
@@ -3229,28 +3392,7 @@ namespace MS2000
                 // SMR1 became 7-bit, 2 stop bits, CKS=3 instead of the 8N1 CKS=0 that
                 // BRR=9 needs for 31250 baud. The MIDI port was never configured, so
                 // SCI1 transmitted NOTHING and LOOP-0x2F60 could never drain.
-                case 0x14: case 0x15: case 0x16: {
-                    auto& r = emulator->getRegisters();
-                    auto& f = emulator->getFlags();
-                    const uint32_t at = emulator->getProgramCounter() - instruction.size;
-                    const uint8_t  rs = (uint8_t)instruction.source_operand & 0x0F;
-                    const uint8_t  rd = (uint8_t)instruction.destination_operand & 0x0F;
-                    const uint8_t  a  = (uint8_t)getRegisterValue(r, rd, 0);
-                    const uint8_t  b  = (uint8_t)getRegisterValue(r, rs, 0);
-                    const uint8_t  res = (instruction.opcode == 0x14) ? uint8_t(a | b)
-                                       : (instruction.opcode == 0x15) ? uint8_t(a ^ b)
-                                                                      : uint8_t(a & b);
-                    setRegisterValue(r, rd, res, 0);
-                    f.zero = (res == 0);
-                    f.negative = (res & 0x80) != 0;
-                    f.overflow = false;
-                    if (!g_h8s_quiet_boot) printf("[EXECUTE] 0x%06X: %s R%d%c,R%d%c = 0x%02X\n",
-                           at, (instruction.opcode == 0x14) ? "OR.B" :
-                               (instruction.opcode == 0x15) ? "XOR.B" : "AND.B",
-                           rs & 7, (rs & 8) ? 'L' : 'H', rd & 7, (rd & 8) ? 'L' : 'H', res);
-                    emulator->addCycles(2);
-                    return true;
-                }
+                case 0x14: case 0x15: case 0x16: { return execLogicB_RR(instruction, emulator); }   // PERF-MCU-7: body moved verbatim to execLogicB_RR()
 
                 // Shift and rotate instructions (legacy executor) - disabled when SSoT active
                 #if !H8S_DISABLE_LEGACY_SHIFT_TABLE
@@ -3370,134 +3512,7 @@ namespace MS2000
 
                   case 0x18:
                   case 0x19:
-                  case 0x1A: { // SUB.B/W/L register forms
-                      auto& regs = emulator->getRegisters();
-                      auto& flags = emulator->getFlags();
-                      const uint32_t pc = emulator->getProgramCounter();
-                      const uint8_t spec = emulator->readByte(pc - instruction.size + 1);
-                      const uint8_t rs = (spec >> 4) & 0x0F;
-                      const uint8_t rd = spec & 0x0F;
-
-                      if (instruction.opcode == 0x18) {
-                          const uint8_t src = (rs & 0x08) ? regs.rl[rs & 0x07] : regs.rh[rs & 0x07];   // rendered p.771
-                          const uint8_t dst = (rd & 0x08) ? regs.rl[rd & 0x07] : regs.rh[rd & 0x07];   // rendered p.771
-                          const uint8_t result = static_cast<uint8_t>(dst - src);
-                          // rendered p.771: bit 3 SET = the LOW half
-                          if (rd & 0x08) {
-                              regs.rl[rd & 0x07] = result;
-                              emulator->syncRegAfterByteWrite(rd & 0x07, false);
-                          } else {
-                              regs.rh[rd & 0x07] = result;
-                              emulator->syncRegAfterByteWrite(rd & 0x07, true);
-                          }
-                          flags.zero = (result == 0);
-                          flags.negative = (result & 0x80u) != 0;
-                          flags.carry = (src > dst);
-                          flags.half_carry = (src & 0x0Fu) > (dst & 0x0Fu);   // BUG121: H = borrow at bit 3 (REJ09B0139 RENDERED p.233); it was never written
-                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x80u) != 0;
-                      } else if (instruction.opcode == 0x19) {
-                          // ==========================================================
-                          // BUG83, 2026-09-17 - `SUB.W Rs,Rd` MASKED ITS REGISTER FIELD
-                          // TO THREE BITS. It is FOUR: Appendix A.2's legend, RENDERED
-                          // page 807 (printed "771"), 0000-0111 = R0..R7 and
-                          // 1000-1111 = E0..E7. This is BUG35's defect and BUG73's, a
-                          // fourth time, and this one was on the LIVE BOOT PATH.
-                          //
-                          // MEASURED by TOOL-PCOFFMAP's ring, one dump, no guesswork:
-                          //   0x014608  19 AA   = SUB.W E2,E2
-                          //             ER2 0x00034DBA -> 0x00030000     (R2 cleared)
-                          //             correct:        -> 0x00004DBA     (E2 cleared)
-                          // and the four instructions after it are a jump table:
-                          //   0x01460A  10 72   SHLL.L #2,ER2        index x 4
-                          //   0x01460C  0A B2   ADD.L ER3,ER2        + base 0x0002B2E8
-                          //   0x01460E  01 00 69 23  MOV.L @ER2,ER3  load the pointer
-                          //   0x014614  5D 30   JSR @ER3             call it
-                          // With E2 left standing, the "index" carried 0x0003 in its top
-                          // half, the table read landed at flash 0x0EB2E8 instead, ER3
-                          // came back 0x60F732B0, and the JSR left the memory map -
-                          // which is exactly what [PC-OFFMAP] then reported.
-                          //
-                          // `getRegisterValue`/`setRegisterValue` already implement the
-                          // legend (they are what BUG35 routed 0x79/0x1B/0x0B through)
-                          // and were simply not used here. The 0x18 branch above is
-                          // already four-bit; 0x1A's field really is `0:ers 0:erd`, so
-                          // three bits there is correct. The distinction belongs to the
-                          // encoding, not to taste.
-                          //
-                          // OWED, NOT DONE THIS ROUND: the half-carry. RENDERED page 775
-                          // (printed "739") gives SUB.W as `I- H[3] N* Z* V* C*`, and
-                          // note [3] on RENDERED page 792 (printed "756") is "Set to 1
-                          // when a carry or borrow occurs at bit 11". No branch of this
-                          // handler writes H at all. Left alone deliberately so this
-                          // round's measurement stays attributable to the field fix;
-                          // it is a real gap and it is recorded in the open queue.
-                          // ==========================================================
-                          const uint16_t src = static_cast<uint16_t>(getRegisterValue(regs, rs, 1));
-                          const uint16_t dst = static_cast<uint16_t>(getRegisterValue(regs, rd, 1));
-                          const uint16_t result = static_cast<uint16_t>(dst - src);
-                          setRegisterValue(regs, rd, result, 1);
-                          flags.zero = (result == 0);
-                          flags.negative = (result & 0x8000u) != 0;
-                          flags.carry = (src > dst);
-                          flags.half_carry = (src & 0x0FFFu) > (dst & 0x0FFFu);   // BUG121: H = borrow at bit 11 (REJ09B0139 RENDERED p.235); it was never written
-                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x8000u) != 0;
-                      } else if ((spec & 0x80) != 0) {
-                          // SUB.L ERs,ERd - Renesas H8S/2350 HM Rev 3.00, App A.1,
-                          // RENDERED page 770: "SUB.L ERs,ERd  1 A  1:ers 0:erd".
-                          // BIT 7 MUST BE SET. See the DEC branch below for why.
-                          const uint8_t s = rs & 0x07;
-                          const uint8_t d = rd & 0x07;
-                          const uint32_t src = regs.er[s];
-                          const uint32_t dst = regs.er[d];
-                          const uint32_t result = dst - src;
-                          emulator->setERd(d, result);
-                          flags.zero = (result == 0);
-                          flags.negative = (result & 0x80000000u) != 0;
-                          flags.carry = (src > dst);
-                          flags.half_carry = (src & 0x0FFFFFFFu) > (dst & 0x0FFFFFFFu);   // BUG121: H = borrow at bit 27 (REJ09B0139 RENDERED p.236); it was never written
-                          flags.overflow = ((dst ^ src) & (dst ^ result) & 0x80000000u) != 0;
-                      } else if (rs == 0x00) {
-                          // ================================================================
-                          // DEC.B Rd - RENDERED page 763: "DEC.B Rd  1 A  0 rd".
-                          // Operation and flags, RENDERED page 739:
-                          //     Rd8 - 1 -> Rd8
-                          //     I -  H -  N changes  Z changes  V changes  C -
-                          // C AND H ARE UNTOUCHED. SUB.L updates both. Running one as the
-                          // other therefore corrupts the carry as well as the result - the
-                          // same CCR-campaign shape that cost the Virus project a dozen
-                          // rounds.
-                          //
-                          // 2026-09-13: every 0x1A fell into the SUB.L branch above,
-                          // regardless of bit 7. The DECODER already knew better - it sets
-                          // the mnemonic "DEC.B Rd" for this exact case - but nothing ever
-                          // read that mnemonic, so the disassembly and the execution
-                          // disagreed. A probe must report what the code DOES; so must a
-                          // mnemonic.
-                          //
-                          // MEASURED in LOOP-0x11CF0, `1A 02` at 0x011D2E:
-                          //     expected  ER2 FFF7DEEF -> FFF7DDEF   (DEC.B on R2H)
-                          //     actual    ER2 FFF7DEEF -> FFF6DEF1   (ER2 - ER0, ER0=0xFFFE)
-                          // ================================================================
-                          const uint8_t idx  = rd & 0x07;
-                          const bool    high = (rd & 0x08) == 0;   // 0-7 = RnH, 8-15 = RnL
-                          const uint8_t dst    = high ? regs.rh[idx] : regs.rl[idx];
-                          const uint8_t result = static_cast<uint8_t>(dst - 1u);
-                          if (high) regs.rh[idx] = result; else regs.rl[idx] = result;
-                          emulator->syncRegAfterByteWrite(idx, high);
-
-                          flags.zero     = (result == 0);
-                          flags.negative = (result & 0x80u) != 0;
-                          flags.overflow = (dst == 0x80u);   // only 0x80 - 1 overflows
-                          // carry and half_carry: NOT TOUCHED, per the rendered page.
-                      } else {
-                          // Neither form. Say so instead of quietly doing arithmetic -
-                          // a branch that cannot reject is not a branch.
-                          printf("[0x1A-UNKNOWN] spec=0x%02X at PC 0x%06X is neither "
-                                 "SUB.L ERs,ERd (bit7 set) nor DEC.B Rd (high nibble 0)\n",
-                                 spec, pc - instruction.size);
-                      }
-                      return true;
-                  }
+                  case 0x1A: { return execSub_RR(instruction, emulator); }   // PERF-MCU-7: body moved verbatim to execSub_RR()
 
                   // ==========================================================
                   // BUG81 - 0x50-0x53, the unsigned multiply/divide block.
@@ -5674,6 +5689,66 @@ namespace MS2000
     }
     
     // New executor method implementation
+    /*  PERF-MCU-6 (2026-10-01). For a decoded primary opcode whose ONLY route through execute(instruction,
+        emulator) is a top-level `case X: return handler(instruction, emulator);` of its switch - checked by
+        brace depth: every case below sits at depth 1 of `switch (instruction.opcode)` - and that nothing
+        before the switch intercepts (the chain before it tests 1C/1D, 10-13, the DAA/DAS/ADDX mnemonics,
+        7C, 40-4F, 58, 72, 5A, F0-FF; the caller excludes the mnemonics), the handler that execute() would
+        reach. The lean path calls it through executeDirect() and skips the wrapper and the chain.
+        (PERF-MCU-7: 14/15/16, 18/19/1A and the 1C/1D test at the top now call bodies moved out verbatim.) A new
+        intercept added in front of the switch for one of these opcodes MUST remove it from this table. */
+    H8S2350InstructionExecutor::DirectFn H8S2350InstructionExecutor::directHandler(uint8_t op)
+    {
+        switch (op) {
+            case 0x08: return &executeADD_B_REG_REG;
+            case 0x09: return &executeADD_W_REG_REG;
+            case 0x0A: return &execute0x0AInstruction;
+            case 0x0B: return &execute0x0BInstruction;
+            case 0x0C: return &executeMOV_B_REG_REG;
+            case 0x0D: return &executeMOV_W_REG_REG;
+            case 0x54: return &execute0x54Instruction;
+            case 0x5C: return &execute0x5CInstruction;
+            case 0x5E: return &execute0x5EInstruction;
+            case 0x6A: return &execute0x6AInstruction;
+            case 0x6B: return &execute0x6BInstruction;
+            case 0x6D: return &execute0x6DInstruction;
+            case 0x6F: return &execute0x6FInstruction;
+            case 0x78: return &execute0x78Instruction;
+            case 0x79: return &execute0x79Instruction;
+            case 0x7A: return &execute0x7AGroup;
+            case 0x14: case 0x15: case 0x16: return &execLogicB_RR;     // PERF-MCU-7 (switch case, depth 1)
+            case 0x18: case 0x19: case 0x1A: return &execSub_RR;        // PERF-MCU-7 (switch case, depth 1)
+            case 0x1C: case 0x1D: return &execCmp_RR;                   // PERF-MCU-7 (the first test in execute())
+            default: break;
+        }
+        if (op >= 0x80 && op <= 0x8F) return &executeMOV_B_IMM8_Rn;
+        if (op >= 0xA0 && op <= 0xAF) return &executeCMP_B_IMM8;
+        if (op >= 0xC0 && op <= 0xCF) return &executeOR_B_IMM8;
+        if (op >= 0xD0 && op <= 0xDF) return &executeXOR_B_IMM8;
+        if (op >= 0xE0 && op <= 0xEF) return &executeAND_B_IMM8;
+        return nullptr;
+    }
+
+    // What execute(emulator, instruction, pc0) does around such a handler: the same try/catch as the switch,
+    // the wrapper's PC watch for its shift/rotate/1B-1D group, then updateLastExec. Cycles are the decoded
+    // baseCycles in every case (the wrapper's 0 for the watched group falls back to them in the caller).
+    bool H8S2350InstructionExecutor::executeDirect(DirectFn fn, const H8S2350Instruction& instruction, H8S2350Emulator* emulator)
+    {
+        bool ok;
+        try {
+            ok = fn(instruction, emulator);
+        } catch (const std::exception& e) {
+            std::cout << "Error executing instruction: " << e.what() << std::endl;
+            ok = false;
+        }
+        if (is_shiftrot_or_shar_primary(instruction.opcode)) {   // the wrapper's PC watch (1C/1D are in its group)
+            const uint32_t want_pc = pcMask24(instruction.decoded_pc + instruction.size);
+            if (emulator->getRegisters().pc != want_pc) emulator->setProgramCounter(want_pc);
+        }
+        emulator->updateLastExec(instruction.decoded_pc, instruction.size, emulator->getProgramCounter(), instruction.opcode);
+        return ok;
+    }
+
     ExecResult H8S2350InstructionExecutor::execute(H8S2350Emulator& emulator, const H8S2350Instruction& instruction, uint32_t pc0)
     {
         // Arm PC fuse to enforce decoded_pc+size through to next fetch

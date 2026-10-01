@@ -333,6 +333,14 @@ namespace MS2000
         // Legacy method (compatibility)
         static bool execute(const H8S2350Instruction& instruction, 
                            class H8S2350Emulator* emulator);
+
+        // PERF-MCU-6: the switch's single-call cases, for the emulator's lean path (see directHandler()).
+        using DirectFn = bool (*)(const H8S2350Instruction&, class H8S2350Emulator*);
+        static DirectFn directHandler(uint8_t decodedOpcode);
+        static bool execCmp_RR(const H8S2350Instruction& instruction, class H8S2350Emulator* emulator);       // PERF-MCU-7: 1C/1D
+        static bool execLogicB_RR(const H8S2350Instruction& instruction, class H8S2350Emulator* emulator);    // PERF-MCU-7: 14/15/16
+        static bool execSub_RR(const H8S2350Instruction& instruction, class H8S2350Emulator* emulator);       // PERF-MCU-7: 18/19/1A
+        static bool executeDirect(DirectFn fn, const H8S2350Instruction& instruction, class H8S2350Emulator* emulator);
         
     private:
         // Move instructions
