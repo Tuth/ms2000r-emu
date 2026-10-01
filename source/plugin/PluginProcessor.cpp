@@ -384,6 +384,7 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("editorW", editorW, nullptr); t.setProperty("editorTab", editorTab, nullptr);
     t.setProperty("hostClock", hostClock.load(), nullptr);
     t.setProperty("transportMsgs", transportMsgs.load(), nullptr);
+    t.setProperty("knobFollow", knobFollow.load(), nullptr);
     t.setProperty("libraryPath", libraryPath, nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
@@ -416,6 +417,7 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     editorW = int(t.getProperty("editorW", 0)); editorTab = int(t.getProperty("editorTab", 0));
     hostClock = bool(t.getProperty("hostClock", true));
     transportMsgs = bool(t.getProperty("transportMsgs", true));
+    knobFollow = bool(t.getProperty("knobFollow", false));
     libraryPath = t.getProperty("libraryPath", "").toString();
 
     // the flash this project's machine had

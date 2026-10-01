@@ -149,6 +149,10 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
     m_clock.setToggleState(m_proc.hostClock.load(), juce::dontSendNotification);
     m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); };
+    m_follow.setToggleState(m_proc.knobFollow.load(), juce::dontSendNotification);
+    m_follow.onClick = [this] { m_proc.knobFollow = m_follow.getToggleState(); refreshKnobs(); m_dirty = true; };
+    m_follow.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_follow);
     m_transport.setToggleState(m_proc.transportMsgs.load(), juce::dontSendNotification);
     m_transport.onClick = [this] { m_proc.transportMsgs = m_transport.getToggleState(); };
     m_transport.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
@@ -212,6 +216,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     showTab(m_proc.editorTab >= 0 && m_proc.editorTab <= 2 ? m_proc.editorTab : 0);
     if (const char* e = std::getenv("MS2K_EDITORSHOT"); e && *e) { m_shotPath = e; m_testTick = 0; showTab(0); }
     if (const char* e = std::getenv("MS2K_EDITORTEST"); e && *e) m_testMode = e;
+    if (m_testMode == "follow") m_proc.knobFollow = true;
     startTimerHz(30);
 }
 
@@ -227,7 +232,7 @@ void Ms2kEditor::setupIo()
     m_io.lit = m_lit; m_io.shown = m_shown; m_io.knobs = m_proc.knobs;
     m_io.volume = &m_proc.volume; m_io.in1 = &m_proc.in1; m_io.in2 = &m_proc.in2;
     m_io.sw = [this](unsigned c, unsigned r, bool d) { if (m_demoPhase == 0) m_proc.setSwitch(c, r, d); };
-    m_io.knob = [this](unsigned m, unsigned x, uint16_t v) { m_proc.setKnob(m, x, v); };
+    m_io.knob = [this](unsigned m, unsigned x, uint16_t v) { m_proc.setKnob(m, x, v); m_lastMoved = int(m * 8 + x); m_lastMoveMs = juce::Time::getMillisecondCounter(); };
 }
 
 void Ms2kEditor::showTab(int t)
@@ -236,7 +241,7 @@ void Ms2kEditor::showTab(int t)
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
     m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
-    m_transport.setVisible(t == 1);
+    m_transport.setVisible(t == 1); m_follow.setVisible(t == 1);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
@@ -266,6 +271,7 @@ void Ms2kEditor::resized()
     m_dac20.setBounds(r.removeFromTop(30));
     m_clock.setBounds(r.removeFromTop(30));
     m_transport.setBounds(r.removeFromTop(30));
+    m_follow.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
     m_demo.setBounds(r.removeFromTop(30).withWidth(300));
     r.removeFromTop(10);
@@ -340,6 +346,15 @@ void Ms2kEditor::timerCallback()
     if (m_testTick >= 0) {
         ++m_testTick;
         if (m_testTick == 60) setSize(1400, int(std::lround(1400.0f * VPanel::kH / VPanel::kW)) + kTabH);
+        if (m_testMode == "follow" && m_proc.runner()) {   // the firmware's pot -> value, read back from the edit buffer
+            auto cut = [&] { return unsigned(m_proc.runner()->getEmulator().peekExternal(MS2000::kEditBufferAddr + 58)); };
+            static unsigned c0 = 0, c1 = 0, c2 = 0;
+            if (m_testTick == 95) c0 = cut();
+            if (m_testTick == 100) m_proc.setKnob(3, 7, 138);
+            if (m_testTick == 130) c1 = cut();
+            if (m_testTick == 140) m_proc.setKnob(3, 7, 1000);
+            if (m_testTick == 170) { c2 = cut(); m_testResult = juce::String::formatted("cutoff byte: %u, pot 138 -> %u, pot 1000 -> %u", c0, c1, c2); }
+        }
         if (m_testMode == "latch") {
             if (m_testTick == 120) testClick(258.0f, 855.0f, true);                   // pad 1
             if (m_testTick == 130) testClick(258.0f + 101.33f * 4, 855.0f, true);     // pad 5
@@ -349,7 +364,9 @@ void Ms2kEditor::timerCallback()
             const float sc = juce::jmax(1.0f, juce::Component::getApproximateScaleFactorForComponent(this));
             const juce::Image img = createComponentSnapshot(getLocalBounds(), true, sc);
             juce::File(m_shotPath + ".txt").replaceWithText(m_proc.status() + juce::String::formatted(
-                "\neditor %d x %d (scale %.2f), last panel draw %.1f ms\n", getWidth(), getHeight(), double(sc), m_paintMs));
+                "\neditor %d x %d (scale %.2f), last panel draw %.1f ms\ndrawn pots: CUTOFF %u RESONANCE %u EG1 ATTACK %u LEVEL %u TEMPO %u (follow %d)\n",
+                getWidth(), getHeight(), double(sc), m_paintMs, unsigned(m_io.knobs[3][7]), unsigned(m_io.knobs[3][2]), unsigned(m_io.knobs[0][4]),
+                unsigned(m_io.knobs[3][3]), unsigned(m_io.knobs[3][0]), int(m_proc.knobFollow.load())) + m_testResult + "\n");
             juce::File f(m_shotPath); f.deleteFile();
             juce::FileOutputStream os(f);
             juce::PNGImageFormat png;
@@ -385,6 +402,7 @@ void Ms2kEditor::timerCallback()
         const juce::String st = juce::String("MS2000R v" MS2K_VERSION "\n") + m_proc.status() + juce::String::formatted("\npanel draw %.1f ms", m_paintMs);
         if (st != m_status.getText()) m_status.setText(st, juce::dontSendNotification);
     }
+    if (m_tab == 0 && refreshKnobs()) changed = true;
     if (changed) { m_dirty = false; repaint(); }
 }
 
@@ -483,4 +501,31 @@ void Ms2kEditor::listBoxItemClicked(int row, const juce::MouseEvent&)
     if (row < 0 || row >= int(m_programs.size())) return;
     if (!m_proc.syx().startProgram(m_programs[size_t(row)].data, m_programs[size_t(row)].name))
         m_libStatus.setText("Busy - wait for the transfer in progress", juce::dontSendNotification);
+}
+
+// ---- KNOB-FOLLOW ----
+// Off: the pots are drawn where the physical pots stand (m_proc.knobs). On: from the edit buffer (programKnobs),
+// for the timbre whose TIMBRE SELECT LED is lit; a pot being turned keeps the mouse's value until 300 ms after
+// the last move (the firmware takes a few ms to read it back). Turning a pot always moves the physical pot.
+bool Ms2kEditor::refreshKnobs()
+{
+    auto* r = m_proc.runner();
+    if (!m_proc.knobFollow.load() || !r) {
+        const bool was = m_io.knobs != m_proc.knobs;
+        m_io.knobs = m_proc.knobs;
+        return was;
+    }
+    uint8_t prog[254];
+    for (int i = 0; i < 254; ++i) prog[i] = r->getEmulator().peekExternal(MS2000::kEditBufferAddr + uint32_t(i));
+    uint16_t want[4][8]; bool fol[4][8];
+    MS2000::programKnobs(prog, m_lit[5][2] > 0.5f ? 1 : 0, want, fol);   // TIMBRE SELECT "2" = LS5.LD02
+    const bool held = (m_mouse.btn || juce::Time::getMillisecondCounter() - m_lastMoveMs < 300);
+    bool changed = m_io.knobs != m_disp;
+    for (int m = 0; m < 4; ++m) for (int x = 0; x < 8; ++x) {
+        if (held && m * 8 + x == m_lastMoved) continue;
+        const uint16_t v = fol[m][x] ? want[m][x] : m_proc.knobs[m][x];
+        if (v != m_disp[m][x]) { m_disp[m][x] = v; changed = true; }
+    }
+    m_io.knobs = m_disp;
+    return changed;
 }

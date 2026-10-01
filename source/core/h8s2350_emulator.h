@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 
 // Guard for contracts utility functions that require emulator access
 #define H8S2350_EMULATOR_H_INCLUDED
@@ -1807,6 +1808,24 @@ public:
     // handed on from the emulation thread in the order written. Thread-safe to set.
     void setMidiOutSink(std::function<void(uint8_t)> s) { std::lock_guard<std::mutex> l(m_midiOutMx); m_midiOutSink = std::move(s); }
     struct PanelLeds { float lit[8][12]; bool codecMute; };
+    // KNOB-FOLLOW (2026-10-01) diagnostic: where in RAM a byte string sits (host-side, no bus cycle). Prints
+    // every hit as (buffer, offset, CPU address) and the 254 bytes from there (one TABLE 1 program).
+    // KNOB-FOLLOW: host-side read of the external memory (the DRAM image) - no bus cycle, no side effect
+    uint8_t peekExternal(uint32_t addr) const { return addr < m_external_memory.size() ? m_external_memory[addr] : uint8_t(0); }
+    void debugFindBytes(const std::string& needle) {
+        auto scan = [&](const std::vector<uint8_t>& v, const char* nm, uint32_t base) {
+            for (size_t i = 0; i + needle.size() <= v.size(); ++i) {
+                if (std::memcmp(v.data() + i, needle.data(), needle.size()) != 0) continue;
+                printf("[FIND] '%s' in %s +0x%05zX = CPU 0x%06zX:", needle.c_str(), nm, i, size_t(base) + i);
+                for (size_t k = 0; k < 254 && i + k < v.size(); ++k) printf("%s%02X", k % 32 ? " " : "\n[FIND]   ", v[i + k]);
+                printf("\n");
+            }
+        };
+        scan(m_cpu_ram, "cpu_ram", H8S2350MemoryMap::CPU_RAM_START);
+        scan(m_ram, "onchip_ram", 0xFFF400u);
+        scan(m_external_memory, "external", 0u);
+        fflush(stdout);
+    }
     PanelLeds panelLeds();
 private:
     std::atomic<uint16_t> m_knob[4][8] = {};

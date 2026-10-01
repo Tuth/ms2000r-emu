@@ -6,6 +6,7 @@
 #include "PluginProcessor.h"
 #include "core/lcd_gui.h"
 #include "gui/vector_panel.h"
+#include "core/knob_follow.h"
 
 class Ms2kEditor : public juce::AudioProcessorEditor, private juce::Timer, private juce::ListBoxModel
 {
@@ -55,7 +56,7 @@ private:
     // screen) 3 s after it opens; MS2K_EDITORTEST=latch first Shift+clicks pads 1 and 5 and EXIT through
     // the same input pass the mouse uses.
     int m_testTick = -1;
-    juce::String m_shotPath, m_testMode;
+    juce::String m_shotPath, m_testMode, m_testResult;
     void testClick(float px, float py, bool shift);
 
     juce::TextButton m_tabPanel{ "Panel" }, m_tabSettings{ "Settings" };
@@ -75,6 +76,11 @@ private:
     int getNumRows() override { return int(m_programs.size()); }
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected) override;
     void listBoxItemClicked(int row, const juce::MouseEvent&) override;
+    // KNOB-FOLLOW: the pots drawn from the edit buffer (or where the physical pots stand)
+    juce::ToggleButton m_follow{ "Knobs show the program  (off: a pot stays where you leave it, as on the unit)" };
+    uint16_t m_disp[4][8] = {};
+    int m_lastMoved = -1; juce::uint32 m_lastMoveMs = 0;
+    bool refreshKnobs();                    // true when a drawn pot changed
     juce::TextButton m_homeBtn{ "Choose the MS2000 folder..." };
     std::unique_ptr<juce::FileChooser> m_chooser;
     juce::Label m_help, m_status;

@@ -20,6 +20,8 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - Plugin extras: a Library page (open a .syx, click a program to hear it - it goes into the edit buffer, the memory is
   not changed); the host tempo as MIDI clock and the host transport as Start/Stop (GLOBAL: MIDI Clock = Ext, the
   arpeggiator starts on beat 1 with the host); Settings -> "Choose the MS2000 folder...".
+- "Knobs show the program" (plugin Settings, standalone checkbox): the pots are drawn where the program being
+  edited has its values (read from the machine's edit buffer); turning one takes over from there without a jump.
 - VST3 (phase 2): the panel in the plugin window; the machine's state (knob positions, settings and the written
   flash sectors) is saved in the host project.
 

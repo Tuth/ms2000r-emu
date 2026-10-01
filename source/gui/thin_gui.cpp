@@ -19,6 +19,7 @@
 #include "../core/lcd_gui.h"
 #include "vector_panel_imgui.h"
 #include "../core/syx_tool.h"
+#include "../core/knob_follow.h"
 #include <commdlg.h>
 #include <cmath>
 #include <algorithm>
@@ -187,6 +188,7 @@ void saveBackBuffer(const char* path)
 struct Settings {
     std::string audio, midi, midiOut; float volume = 0.7f;
     bool vectorPanel = true;                          // VECTOR-PANEL: the MS2000R panel drawing (false = the test panel)
+    bool knobFollow = false;                          // KNOB-FOLLOW: the pots show the program being edited
     // AIN-SOURCES: what feeds each MS2000 input jack - a capture endpoint and one of its channels
     // (0 = left, 1 = right, 2 = (L+R)/2); an empty device = nothing plugged in.
     struct InSrc { std::string dev; int ch = 0; };
@@ -204,7 +206,7 @@ Settings loadSettings()
     while (std::getline(f, line)) {
         const auto eq = line.find('='); if (eq == std::string::npos) continue;
         const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-        if (k == "audio") s.audio = v; else if (k == "midi") s.midi = v; else if (k == "midi_out") s.midiOut = v; else if (k == "vector_panel") s.vectorPanel = v != "0"; else if (k == "volume") s.volume = float(atof(v.c_str()));
+        if (k == "audio") s.audio = v; else if (k == "midi") s.midi = v; else if (k == "midi_out") s.midiOut = v; else if (k == "vector_panel") s.vectorPanel = v != "0"; else if (k == "knob_follow") s.knobFollow = v == "1"; else if (k == "volume") s.volume = float(atof(v.c_str()));
         else if (k == "audio_in") { if (!v.empty()) { s.in[0] = { v, 0 }; s.in[1] = { v, 1 }; } }   // old single setting: L -> IN1, R -> IN2
         else if (k == "in1_src" || k == "in2_src") {
             Settings::InSrc& d = s.in[k == "in2_src" ? 1 : 0]; const auto bar = v.rfind('|');
@@ -221,7 +223,7 @@ Settings loadSettings()
 void saveSettings(const Settings& s)
 {
     std::ofstream f("thin_gui.ini");
-    f << "audio=" << s.audio << "\nmidi=" << s.midi << "\nmidi_out=" << s.midiOut << "\nvector_panel=" << (s.vectorPanel ? 1 : 0) << "\nvolume=" << s.volume << "\n"
+    f << "audio=" << s.audio << "\nmidi=" << s.midi << "\nmidi_out=" << s.midiOut << "\nvector_panel=" << (s.vectorPanel ? 1 : 0) << "\nknob_follow=" << (s.knobFollow ? 1 : 0) << "\nvolume=" << s.volume << "\n"
       << "in1_src=" << s.in[0].dev << "|" << s.in[0].ch << "\nin2_src=" << s.in[1].dev << "|" << s.in[1].ch
       << "\nin1_level=" << s.vr30 << "\nin2_level=" << s.vr31
       << "\nin2_mic=" << (s.mic2 ? 1 : 0) << "\ndac20=" << (s.dac20 ? 1 : 0) << "\n";
@@ -641,14 +643,27 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
 
         ImGui::SameLine();
         ImGui::Checkbox("Vector panel", &st.vectorPanel);
-        if (st.vectorPanel) { ImGui::SameLine(); ImGui::TextDisabled("(Shift+click a pad 1-16 or EXIT: it stays held)"); }
+        if (st.vectorPanel) { ImGui::SameLine(); ImGui::Checkbox("Knobs show the program", &st.knobFollow); ImGui::SameLine(); ImGui::TextDisabled("(Shift+click a pad 1-16 or EXIT: it stays held)"); }
         if (st.vectorPanel) {
             // VECTOR-PANEL (vector_panel.h): the MS2000R front panel, fitted to the window below this line.
             static VPanel::IO vio;
             vio.lit = leds.lit; vio.shown = shown; vio.knobs = st.knob;
+            // KNOB-FOLLOW (knob_follow.h): drawn from the edit buffer; a pot being turned keeps the mouse's value
+            // until 300 ms after its last move; turning a pot always moves the physical pot (st.knob).
+            static uint16_t disp[4][8]; static int lastMoved = -1; static ULONGLONG lastMs = 0;
+            if (st.knobFollow) {
+                uint8_t prog[254];
+                for (int i = 0; i < 254; ++i) prog[i] = cpu.peekExternal(MS2000::kEditBufferAddr + uint32_t(i));
+                uint16_t want[4][8]; bool fol[4][8];
+                MS2000::programKnobs(prog, leds.lit[5][2] > 0.5f ? 1 : 0, want, fol);
+                const bool held = ImGui::IsMouseDown(0) || GetTickCount64() - lastMs < 300;
+                for (int m = 0; m < 4; ++m) for (int x = 0; x < 8; ++x)
+                    if (!(held && m * 8 + x == lastMoved)) disp[m][x] = fol[m][x] ? want[m][x] : st.knob[m][x];
+                vio.knobs = disp;
+            }
             vio.volume = &st.volume; vio.in1 = &st.vr30; vio.in2 = &st.vr31;
             vio.sw = [&cpu, &demoPhase](unsigned c, unsigned r, bool d) { if (demoPhase == 0) cpu.setPanelSwitch(c, r, d); };
-            vio.knob = [&cpu](unsigned m, unsigned x, uint16_t v) { cpu.setPanelKnob(m, x, v); };
+            vio.knob = [&cpu, &st](unsigned m, unsigned x, uint16_t v) { st.knob[m][x] = v; cpu.setPanelKnob(m, x, v); lastMoved = int(m * 8 + x); lastMs = GetTickCount64(); };
             const LcdGuiSnapshot lcdSnap = runner.getLcdGuiSnapshot();
             VPanel::ImGuiBackend vbe;
             vbe.dl = ImGui::GetWindowDrawList(); vbe.f = panelFont ? panelFont : ImGui::GetFont();

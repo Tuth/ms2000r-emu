@@ -345,6 +345,10 @@ bool Ms2kRunner::runSteps(int n) {
 
 bool Ms2kRunner::tickHousekeeping() {
     using clk = std::chrono::steady_clock;
+    {   // KNOB-FOLLOW diag (R2, default OFF): MS2K_FINDBYTES=<text> - once, 8 s of MCU time in, where it sits in RAM
+        static const char* fb = std::getenv("MS2K_FINDBYTES"); static bool done = false;
+        if (fb && *fb && !done && m_cpu && m_cpu->getCycles() > 8ull * m_cpu->getClockFrequency()) { done = true; m_cpu->debugFindBytes(fb); }
+    }
     ms2k_phase("runner-tick");
     
     // Set timer tick flag (after at least some execution)
