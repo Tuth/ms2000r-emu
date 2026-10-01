@@ -27,8 +27,8 @@ struct TestHead : juce::AudioPlayHead {
     juce::Optional<PositionInfo> getPosition() const override
     {
         PositionInfo p; p.setBpm(bpm); p.setTimeInSamples(pos);
-        // plays from startAt to stopAt, its ppq starting at 0.3 (not on a beat): FA must wait for ppq 1.0
-        p.setIsPlaying(pos >= startAt && pos < stopAt); p.setPpqPosition(0.3 + double(pos - startAt) / rate * bpm / 60.0);
+        // plays from startAt to stopAt from ppq 4.0001 (bar 2, as a DAW gives it): FA must go at once
+        p.setIsPlaying(pos >= startAt && pos < stopAt); p.setPpqPosition(4.0001 + double(pos - startAt) / rate * bpm / 60.0);
         return p;
     }
 };

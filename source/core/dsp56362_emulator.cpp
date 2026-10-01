@@ -703,6 +703,11 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
             // first minute every second; later every 30 s, and in any second that lost SHI words (VOCODER-1 follow-up)
             static unsigned secs = 0; static uint64_t ovrSeen = 0; ++secs;
             const bool ovrNew = m_shiOverruns != ovrSeen; ovrSeen = m_shiOverruns;
+            // JIT-SM detector (2026-10-01): the library's JIT does not model arithmetic saturation mode (SR SM, bit 20;
+            // its interpreter does). This firmware never sets it (measured: RESO-ART 1). Should it ever, say so once.
+            { static bool smTold = false;
+              if (!smTold && (m_dsp->getSR().toWord() & 0x100000)) { smTold = true;
+                  printf("[DSP56362] WARNING: SR.SM (arithmetic saturation) is set at PC=%06X - the JIT does not model it\n", m_dsp->getPC().toWord()); } }
             if (told < 60 || ovrNew || secs % 30 == 0) { ++told;
                 printf("[DSP56362] t=%.2f s: PC=%06X SR=%06X core=%llu Hz instr=%llu cycles=%llu TX frames=%llu "
                        "IRQB edges=%llu IRQD(PB0) edges=%llu (%.3f s in DMA) exec()=%llu SHI words in=%llu (RX overruns %llu) wall=%.2f s\n",

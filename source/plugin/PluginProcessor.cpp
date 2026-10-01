@@ -264,8 +264,10 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     // the arpeggiator keeps time either way. Settings: on/off.
     // MIDI-CLOCK b (Tamas: the beat position too): the MS2000 receives F8, FA Start and FC Stop ("Arpeggiator stop")
     // with Clock = External/Auto - no Song Position (MIDI Implementation, RECOGNIZED REALTIME). So when the host
-    // starts playing (or jumps, e.g. a loop), FA goes out just before the first clock that falls on a quarter-note
-    // boundary of the host's ppq, and that clock is beat 1 for the machine; when the host stops, FC. Settings.
+    // starts playing (or jumps, e.g. a loop), FA goes out AT ONCE, with a clock at the first sample of the block - the
+    // clock phase is snapped to the host's position (to the nearest clock, < half a clock = 1/48 quarter) - so the
+    // machine's beat 1 is where the host started (Tamas: waiting for the next quarter made the arp lag a beat);
+    // when the host stops, FC. Settings.
     if (hostClock) {
         double bpm = 0.0, ppq = 0.0; bool playing = false;
         if (auto* ph = getPlayHead())
@@ -275,16 +277,15 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
             }
         if (bpm > 1.0) {
             const double tps = bpm / 60.0 * 24.0 / m_hostRate;            // clocks per host sample
-            const double t0 = playing ? ppq * 24.0 : m_clockTick, t1 = t0 + tps * double(N);
+            double t0 = playing ? ppq * 24.0 : m_clockTick;
             static const uint8_t f8 = 0xF8, fa = 0xFA, fc = 0xFC;
             const bool tr = transportMsgs.load();
-            if (playing && (!m_wasPlaying || std::abs(t0 - m_clockTick) > 1.0)) m_startPending = tr;   // start or jump
+            const bool start = playing && tr && (!m_wasPlaying || std::abs(t0 - m_clockTick) > 1.0);   // start or jump
             if (!playing && m_wasPlaying && tr) midi.addEvent(&fc, 1, 0);
-            for (double k = std::ceil(t0 - 1e-9); k < t1; k += 1.0) {
-                const int at = juce::jlimit(0, N - 1, int((k - t0) / tps));
-                if (m_startPending && playing && (llround(k) % 24) == 0) { midi.addEvent(&fa, 1, at); m_startPending = false; }
-                midi.addEvent(&f8, 1, at);
-            }
+            if (start) { t0 = std::round(t0); midi.addEvent(&fa, 1, 0); }   // beat 1 = this clock, now
+            const double t1 = t0 + tps * double(N);
+            for (double k = std::ceil(t0 - 1e-9); k < t1; k += 1.0)
+                midi.addEvent(&f8, 1, juce::jlimit(0, N - 1, int((k - t0) / tps)));
             m_clockTick = t1;
             m_wasPlaying = playing;
         }
