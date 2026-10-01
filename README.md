@@ -1,4 +1,4 @@
-# ms2000r-emu  (v0.9.0)
+# ms2000r-emu  (v0.9.1)
 
 A hardware-level emulator of the **KORG MS2000R** (rack version of the MS2000 analog-modeling synthesizer):
 the H8S/2350 main CPU runs the original firmware instruction by instruction, and the DSP56362 runs the
@@ -17,6 +17,9 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - .syx: load a bank or program file into the machine and save all 128 programs as .syx (standalone: the buttons
   under the panel; plugin: Settings). The file goes into the emulated MIDI IN and the firmware itself stores it,
   as the real unit does from an editor; its DATA LOAD COMPLETED / ERROR answer is shown.
+- Plugin extras: a Library page (open a .syx, click a program to hear it - it goes into the edit buffer, the memory is
+  not changed); the host tempo as MIDI clock and the host transport as Start/Stop (GLOBAL: MIDI Clock = Ext, the
+  arpeggiator starts on beat 1 with the host); Settings -> "Choose the MS2000 folder...".
 - VST3 (phase 2): the panel in the plugin window; the machine's state (knob positions, settings and the written
   flash sectors) is saved in the host project.
 
