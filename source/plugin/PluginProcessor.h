@@ -48,6 +48,7 @@ public:
     float in1 = 1.0f, in2 = 1.0f, volume = 1.0f;
     bool mic2 = false, dac20 = false;
     int editorW = 0, editorTab = 0;                      // the editor's last width and page
+    std::atomic<bool> hostClock{ true };                 // MIDI-CLOCK: the host tempo as F8 clocks into MIDI IN
     void setKnob(unsigned mux, unsigned x, uint16_t v);
     void setSwitch(unsigned col, unsigned row, bool down);
     void applyInputStage();
@@ -60,7 +61,8 @@ public:
 private:
     void timerCallback() override;           // SYX-1: drives m_syx (message thread)
     MS2000::SyxTool m_syx;
-    std::atomic<uint64_t> m_frames{ 0 };      // host frames played since the machine started
+    std::atomic<uint64_t> m_frames{ 0 };
+    double m_clockTick = 0.0;                // MIDI-CLOCK: where the free-running clock stands (in clocks)      // host frames played since the machine started
     int m_syxDiag = 0;
     bool bootMachine();                      // once, on the first prepareToPlay
     bool startMachine();                     // the power-on itself (boot and reboot)

@@ -60,6 +60,7 @@ private:
 
     juce::TextButton m_tabPanel{ "Panel" }, m_tabSettings{ "Settings" };
     juce::ToggleButton m_mic2{ "AUDIO IN 2 = MIC  (rear panel switch SW1; off = LINE)" };
+    juce::ToggleButton m_clock{ "Host tempo -> MIDI clock  (for GLOBAL: MIDI Clock = Ext; 24 clocks a quarter into MIDI IN)" };
     juce::ToggleButton m_dac20{ "DAC 20-bit  (the AK4522 hears the 20 MSBs; off = all 24 bits)" };
     juce::TextButton m_demo{ "Demo songs  (EXIT + GLOBAL)" };
     juce::TextButton m_syxLoad{ "Load .syx..." }, m_syxSave{ "Save all programs as .syx..." };

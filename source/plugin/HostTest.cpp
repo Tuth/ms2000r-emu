@@ -8,6 +8,7 @@
 //   mode "knobs0" (VST3-2): the folder's machine with all 32 pots at 0 (phase 1 never set them) - an A/B.
 //   mode "noin"   (VST3-2): the input bus disabled - an A/B for the Audio In path.
 //   mode "syx"    (SYX-1): plays with the message loop running, so MS2K_SYXIMPORT / MS2K_SYXEXPORT work.
+//   mode "clock"  (MIDI-CLOCK): a 140 BPM transport, playing the first half, stopped the second (MS2K_MIDILOG shows the F8s).
 //   mode "reboot" (VST3-2): 1 s in, a state with a different flash is set while the machine runs (a power
 //                 cycle); the note is played 5 s after that; the WAV / RMS show the machine came back.
 #include <JuceHeader.h>
@@ -19,7 +20,18 @@ namespace {
 std::vector<double> g_blockMs;   // PERF-VST: the time of every processBlock call
 bool g_pump = false;
 bool g_echo = false;             // SYX-1b: the plugin's MIDI OUT fed back into its MIDI IN (a host loop)
-juce::MidiBuffer g_echoBuf;             // SYX-1: run the message loop while playing (the plugin's timers)
+juce::MidiBuffer g_echoBuf;
+// MIDI-CLOCK: a host transport - 140 BPM, playing for the first half of the run, stopped for the second
+struct TestHead : juce::AudioPlayHead {
+    double bpm = 140.0, rate = 44100.0; int64_t pos = 0, stopAt = 0;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p; p.setBpm(bpm); p.setTimeInSamples(pos);
+        p.setIsPlaying(pos < stopAt); p.setPpqPosition(double(pos) / rate * bpm / 60.0);
+        return p;
+    }
+};
+TestHead* g_head = nullptr;             // SYX-1: run the message loop while playing (the plugin's timers)
 std::unique_ptr<juce::AudioPluginInstance> load(juce::VST3PluginFormat& fmt, const juce::PluginDescription& d, double rate, int block)
 {
     juce::String err;
@@ -40,6 +52,7 @@ void play(juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& out, int fr
         if (noteOn >= pos && noteOn < pos + n) midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), noteOn - pos);
         if (noteOff >= pos && noteOff < pos + n) midi.addEvent(juce::MidiMessage::noteOff(1, 60), noteOff - pos);
         if (g_echo) { for (const auto m : g_echoBuf) midi.addEvent(m.getMessage(), 0); g_echoBuf.clear(); }
+        if (g_head) g_head->pos = pos;
         const double t0 = juce::Time::getMillisecondCounterHiRes();
         inst.processBlock(buf, midi);
         g_blockMs.push_back(juce::Time::getMillisecondCounterHiRes() - t0);
@@ -159,6 +172,8 @@ int main(int argc, char** argv)
     }
 
     if (mode == "syx" || mode == "syxecho") g_pump = true;
+    TestHead head;
+    if (mode == "clock") { head.rate = rate; head.stopAt = int64_t(secs * rate / 2); g_head = &head; inst->setPlayHead(&head); }
     if (mode == "syxecho") g_echo = true;   // SYX-1: MS2K_SYXIMPORT / MS2K_SYXEXPORT act from the plugin's timer
     const int total = int(secs * rate);
     juce::AudioBuffer<float> out(2, juce::jmax(1, total));

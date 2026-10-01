@@ -146,6 +146,8 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_tabSettings.onClick = [this] { showTab(1); };
     m_mic2.setToggleState(m_proc.mic2, juce::dontSendNotification);
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
+    m_clock.setToggleState(m_proc.hostClock.load(), juce::dontSendNotification);
+    m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); };
     m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); };
     m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); };
     m_syxLoad.onClick = [this] {
@@ -178,7 +180,8 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
                    "POWER / VOLUME is the plugin's output level; AUDIO IN 1 / 2 are the input level pots. The host routes "
                    "its input bus to AUDIO IN 1 (left) and 2 (right).", juce::dontSendNotification);
     m_help.setJustificationType(juce::Justification::topLeft);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) addChildComponent(*c);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) addChildComponent(*c);
+    m_clock.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     m_syxStatus.setColour(juce::Label::textColourId, juce::Colour(236, 242, 244));
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_help, &m_status })
         c->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)), c->setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
@@ -213,7 +216,7 @@ void Ms2kEditor::showTab(int t)
     m_tab = t; m_proc.editorTab = t;
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
-    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t == 1) { m_io.releaseAll(); m_mouse.active.clear(); }
     m_dirty = true; repaint();
 }
@@ -232,6 +235,7 @@ void Ms2kEditor::resized()
     auto r = getLocalBounds().withTrimmedTop(kTabH).reduced(24, 16);
     m_mic2.setBounds(r.removeFromTop(30));
     m_dac20.setBounds(r.removeFromTop(30));
+    m_clock.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
     m_demo.setBounds(r.removeFromTop(30).withWidth(300));
     r.removeFromTop(10);

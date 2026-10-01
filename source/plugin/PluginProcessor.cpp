@@ -246,6 +246,27 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const uint32_t toRender = need > have ? uint32_t(need - have) : 0u;
     if (m_tmpL.size() < toRender) { m_tmpL.resize(toRender); m_tmpR.resize(toRender); m_tmpFlags.resize(toRender); }
 
+    // MIDI-CLOCK (2026-10-01, Tamas: with Global MIDI Clock = Ext the tempo went to 0 - a VST3 host sends no MIDI
+    // clock, only its tempo): the host's tempo as F8 timing clocks, 24 per quarter, into MIDI IN at their sample.
+    // Phase-locked to the host's ppq position while it plays; free-running at its tempo while it is stopped, so
+    // the arpeggiator keeps time either way. No Start/Stop/SPP (FA/FC/F2) are sent. Settings: on/off.
+    if (hostClock) {
+        double bpm = 0.0, ppq = 0.0; bool playing = false;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition()) {
+                if (auto b = pos->getBpm()) bpm = *b;
+                if (auto p = pos->getPpqPosition(); p && pos->getIsPlaying()) { ppq = *p; playing = true; }
+            }
+        if (bpm > 1.0) {
+            const double tps = bpm / 60.0 * 24.0 / m_hostRate;            // clocks per host sample
+            const double t0 = playing ? ppq * 24.0 : m_clockTick, t1 = t0 + tps * double(N);
+            static const uint8_t f8 = 0xF8;
+            for (double k = std::ceil(t0 - 1e-9); k < t1; k += 1.0)
+                midi.addEvent(&f8, 1, juce::jlimit(0, N - 1, int((k - t0) / tps)));
+            m_clockTick = t1;
+        }
+    }
+
     // MIDI IN: a host sample position -> the source frame it falls on in this render.
     m_midiIn.clear();
     for (const auto meta : midi) {
@@ -337,6 +358,7 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("in1", in1, nullptr); t.setProperty("in2", in2, nullptr); t.setProperty("volume", volume, nullptr);
     t.setProperty("mic2", mic2, nullptr); t.setProperty("dac20", dac20, nullptr);
     t.setProperty("editorW", editorW, nullptr); t.setProperty("editorTab", editorTab, nullptr);
+    t.setProperty("hostClock", hostClock.load(), nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
     else if (m_haveProjectFlash && m_projectMask) { mask = m_projectMask; img = m_projectImage.data(); }
@@ -366,6 +388,7 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     volume = float(double(t.getProperty("volume", 1.0)));
     mic2 = bool(t.getProperty("mic2", false)); dac20 = bool(t.getProperty("dac20", false));
     editorW = int(t.getProperty("editorW", 0)); editorTab = int(t.getProperty("editorTab", 0));
+    hostClock = bool(t.getProperty("hostClock", true));
 
     // the flash this project's machine had
     const uint32_t mask = uint32_t(int(t.getProperty("flashMask", 0))) & ((1u << MS2000::FlashROM::NUM_SECTORS) - 1u);
