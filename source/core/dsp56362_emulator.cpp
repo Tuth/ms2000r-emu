@@ -644,8 +644,14 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
                 e.lc = m_dsp->regs().lc.toWord(); e.mode = unsigned(m_dsp->getProcessingMode()); e.cyc = m_dsp->getCycles(); e.fifo = m_periphX->getSHI().rxCount();
                 m_dsp->exec(); ++m_execCalls;
             }
-        } else
-        while (m_dsp->getCycles() < m_cycleTarget) { m_dsp->exec(); ++m_execCalls; }
+        } else {
+            // PERF-DSP-2 (2026-10-01): all the blocks up to the target under one trampoline entry - the same
+            // interrupt/peripheral call before every block and the same blocks (see JitTrampoline::execUntilCycles).
+            // m_execCalls counts these runs now, not blocks. MS2K_DSPEXECLOOP=1 = the exec() loop (A/B).
+            static const bool execLoop = [] { const char* e = std::getenv("MS2K_DSPEXECLOOP"); return e && *e == '1'; }();
+            if (execLoop) { while (m_dsp->getCycles() < m_cycleTarget) { m_dsp->exec(); ++m_execCalls; } }
+            else if (m_dsp->getCycles() < m_cycleTarget) { m_dsp->execUntilCycles(m_cycleTarget); ++m_execCalls; }
+        }
         if (!m_batchOk.load(std::memory_order_relaxed)) m_batchOk.store((m_periphX->getEsaiClock().getPCTL() & (1u << 18)) != 0, std::memory_order_relaxed);   // PERF-131: PEN
     } else {
         static TWord last = m_mem->get(watchArea, TWord(ywatch));

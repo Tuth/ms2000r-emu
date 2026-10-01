@@ -270,6 +270,107 @@ namespace dsp56k
 			profiling->addFunction("trampolineExecLoop", reinterpret_cast<void*>(m_funcExecLoop), codeHolder);
 	}
 
+	void JitTrampoline::generateExecUntilCyclesFunc()
+	{
+#ifdef HAVE_X86_64
+		asmjit::CodeHolder codeHolder;
+		initCodeHolder(codeHolder);
+
+		JitEmitter m_asm(&codeHolder);
+
+		m_asm.addDiagnosticOptions(asmjit::DiagnosticOptions::kValidateIntermediate);
+		m_asm.addDiagnosticOptions(asmjit::DiagnosticOptions::kValidateAssembler);
+
+		// the frame of generateExecLoopFunc(), with the cycle target where its counter was
+		m_asm.push(r64(regDspPtr));
+		for (const auto& gp : g_trampolineSavedGPs)
+			m_asm.push(r64(gp));
+
+#ifdef _WIN32
+		static constexpr uint32_t g_shadow = 32;
+#else
+		static constexpr uint32_t g_shadow = 0;
+#endif
+		static constexpr uint32_t g_slotDsp = g_shadow;				// DSP*
+		static constexpr uint32_t g_slotTarget = g_shadow + 8;		// uint64_t cycle target
+		static constexpr uint32_t g_slotPeriphFunc = g_shadow + 16;
+		static constexpr uint32_t g_slotClockPtr = g_shadow + 24;
+		static constexpr int g_pushCount = static_cast<int>(std::size(g_trampolineSavedGPs)) + 1;
+		static constexpr int g_slotBytes = static_cast<int>(g_shadow) + 32;
+		static constexpr uint32_t g_additionalStackSize = static_cast<uint32_t>(g_slotBytes + (((8 - 8*g_pushCount - g_slotBytes) % 16 + 16) % 16));
+		static_assert(((8 - 8*g_pushCount - static_cast<int>(g_additionalStackSize)) % 16) == 0, "rsp must be 16 byte aligned at the call");
+		m_asm.sub(asmjit::x86::regs::rsp, asmjit::Imm(g_additionalStackSize));
+
+		const auto argDspPtr = r64(g_funcArgGPs[0]);
+		const auto argTarget = r64(g_funcArgGPs[1]);
+
+		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8), argDspPtr);
+		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotTarget, 8), argTarget);
+
+		const auto* const periphFunc = reinterpret_cast<const void*>(m_dsp.getExecPeripheralsFunc());
+		const auto* const targetClock = m_dsp.getPeriph(0)->getTargetClockPtr();
+
+		const auto ptrDspRegs = Jitmem::makeRelativePtr(&m_dsp.regs(), &m_dsp, argDspPtr, 8);
+		assert(ptrDspRegs.offset());
+		m_asm.lea(regDspPtr, ptrDspRegs);
+
+		m_asm.mov(asmjit::x86::rax, asmjit::Imm(periphFunc));
+		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotPeriphFunc, 8), asmjit::x86::rax);
+		m_asm.mov(asmjit::x86::rax, asmjit::Imm(targetClock));
+		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotClockPtr, 8), asmjit::x86::rax);
+
+		const auto label = m_asm.newNamedLabel("beginExecUntilCycles");
+		m_asm.align(asmjit::AlignMode::kCode, 64);
+		m_asm.bind(label);
+
+		const auto dsp = asmjit::x86::rax;
+		const auto lCallInt = m_asm.newLabel();
+		const auto lSkipInt = m_asm.newLabel();
+		const auto scratchA = asmjit::x86::r10;
+		const auto scratchB = asmjit::x86::r11;
+
+		// 1) the interrupt func, with execPeriph()'s "target clock not reached" early-out inlined (as in the exec loop)
+		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
+		m_asm.mov(g_funcToCall, Jitmem::makeRelativePtr(&m_dsp.getInterruptFunc(), &m_dsp, dsp, 8));
+		m_asm.cmp(g_funcToCall, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotPeriphFunc, 8));
+		m_asm.jne(lCallInt);
+		m_asm.mov(scratchA, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotClockPtr, 8));
+		m_asm.mov(scratchB, asmjit::x86::ptr(scratchA, 0, 8));
+		m_asm.cmp(scratchB, Jitmem::makeRelativePtr(&m_dsp.getInstructionCounter(), &m_dsp, dsp, 8));
+		m_asm.ja(lSkipInt);
+		m_asm.bind(lCallInt);
+		m_asm.mov(g_funcArgGPs[0], dsp);
+		m_asm.call(g_funcToCall);
+		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
+		m_asm.bind(lSkipInt);
+
+		// 2) the block at the current PC: (DspRegs*, PC)
+		m_asm.mov(g_funcToCall, Jitmem::makeRelativePtr(&m_dsp.getJitEntries(), &m_dsp, dsp, 8));
+		m_asm.mov(r32(g_funcArgGPs[1]), Jitmem::makeRelativePtr(&m_dsp.regs().pc.var, &m_dsp, dsp, 4));
+		m_asm.mov(g_funcToCall, Jitmem::makePtr(g_funcToCall, g_funcArgGPs[1], 3, 8));
+		m_asm.mov(r64(g_funcArgGPs[0]), regDspPtr);
+		m_asm.call(g_funcToCall);
+
+		// 3) again while cycles < target
+		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
+		m_asm.mov(scratchA, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotTarget, 8));
+		m_asm.cmp(Jitmem::makeRelativePtr(&m_dsp.getCycles(), &m_dsp, dsp, 8), scratchA);
+		m_asm.jb(label);
+
+		m_asm.add(asmjit::x86::regs::rsp, asmjit::Imm(g_additionalStackSize));
+		for (size_t i=std::size(g_trampolineSavedGPs); i-- > 0;)
+			m_asm.pop(r64(g_trampolineSavedGPs[i]));
+		m_asm.pop(r64(regDspPtr));
+
+		m_asm.ret();
+		m_asm.finalize();
+		m_runtime.add(&m_funcExecUntilCycles, &codeHolder);
+
+		if (auto* profiling = m_dsp.getJit().getProfilingSupport())
+			profiling->addFunction("trampolineExecUntilCycles", reinterpret_cast<void*>(m_funcExecUntilCycles), codeHolder);
+#endif
+	}
+
 	void JitTrampoline::generateExecOneFunc()
 	{
 		asmjit::CodeHolder codeHolder;

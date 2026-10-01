@@ -1,0 +1,191 @@
+diff --git a/source/dsp56kEmu/jittrampoline.h b/source/dsp56kEmu/jittrampoline.h
+--- a/source/dsp56kEmu/jittrampoline.h
++++ b/source/dsp56kEmu/jittrampoline.h
+@@ -17,6 +17,7 @@
+ 	public:
+ 		typedef void (*TExecLoopFunc)(DSP*, uint32_t) noexcept;				// DSP, iteration count
+ 		typedef void (*TExecOneFunc)(JitDspPtr*, TWord, TJitFunc) noexcept;	// DspRegs, PC, function to be called
++		typedef void (*TExecUntilCyclesFunc)(DSP*, uint64_t) noexcept;		// DSP, exclusive cycle target (MS2000 PERF-DSP-2)
+ 
+ 		static constexpr uint32_t UnrollShift = 3;
+ 		static constexpr uint32_t UnrollSize = 1<<UnrollShift;
+@@ -27,6 +28,7 @@
+ 		{
+ 			generateExecLoopFunc();
+ 			generateExecOneFunc();
++			generateExecUntilCyclesFunc();
+ 		}
+ 
+ 		void exec(DSP* _dsp, uint32_t _count) noexcept
+@@ -44,6 +46,19 @@
+ 			stopped();
+ 		}
+ 
++		/*	MS2000 PERF-DSP-2: blocks under ONE trampoline entry until the DSP cycle counter reaches _targetCycles - the
++			same sequence as "while(cycles < target) dsp.exec()": before every block the interrupt/peripheral function
++			(with the exec loop's inlined "no peripheral due" test, which is execPeriph()'s own first test), then the
++			block at the current PC. Idea from joelanders/dsp56300-md-mm ("Add cycle-bounded JIT trampoline execution").
++			x64 only; elsewhere the function is not generated and DSP::execUntilCycles loops over exec(). */
++		bool hasExecUntilCycles() const noexcept { return m_funcExecUntilCycles != nullptr; }
++		void execUntilCycles(DSP* _dsp, const uint64_t _targetCycles) noexcept
++		{
++			++m_running;
++			m_funcExecUntilCycles(_dsp, _targetCycles);
++			stopped();
++		}
++
+ 		/*	Generated code calls peripherals and external bus devices, and those can destroy blocks by writing P memory. The
+ 			block that made the call can be one of them, or it jumps to one of them when it ends, so the code of a destroyed
+ 			block is released once no generated code runs anymore.
+@@ -62,6 +77,7 @@
+ 		void initCodeHolder(asmjit::CodeHolder& _codeHolder);
+ 		void generateExecLoopFunc();
+ 		void generateExecOneFunc();
++		void generateExecUntilCyclesFunc();
+ 
+ 		DSP& m_dsp;
+ 		asmjit::JitRuntime m_runtime;
+@@ -69,6 +85,7 @@
+ 		AsmJitErrorHandler m_errorHandler;
+ 		TExecLoopFunc m_funcExecLoop = nullptr;
+ 		TExecOneFunc m_funcExecOne = nullptr;
++		TExecUntilCyclesFunc m_funcExecUntilCycles = nullptr;
+ 
+ 		uint32_t m_running = 0;					// exec and execOne nest, generated code runs while this is not zero
+ 		std::vector<TJitFunc> m_retiredCode;
+diff --git a/source/dsp56kEmu/jittrampoline.cpp b/source/dsp56kEmu/jittrampoline.cpp
+--- a/source/dsp56kEmu/jittrampoline.cpp
++++ b/source/dsp56kEmu/jittrampoline.cpp
+@@ -270,6 +270,107 @@
+ 			profiling->addFunction("trampolineExecLoop", reinterpret_cast<void*>(m_funcExecLoop), codeHolder);
+ 	}
+ 
++	void JitTrampoline::generateExecUntilCyclesFunc()
++	{
++#ifdef HAVE_X86_64
++		asmjit::CodeHolder codeHolder;
++		initCodeHolder(codeHolder);
++
++		JitEmitter m_asm(&codeHolder);
++
++		m_asm.addDiagnosticOptions(asmjit::DiagnosticOptions::kValidateIntermediate);
++		m_asm.addDiagnosticOptions(asmjit::DiagnosticOptions::kValidateAssembler);
++
++		// the frame of generateExecLoopFunc(), with the cycle target where its counter was
++		m_asm.push(r64(regDspPtr));
++		for (const auto& gp : g_trampolineSavedGPs)
++			m_asm.push(r64(gp));
++
++#ifdef _WIN32
++		static constexpr uint32_t g_shadow = 32;
++#else
++		static constexpr uint32_t g_shadow = 0;
++#endif
++		static constexpr uint32_t g_slotDsp = g_shadow;				// DSP*
++		static constexpr uint32_t g_slotTarget = g_shadow + 8;		// uint64_t cycle target
++		static constexpr uint32_t g_slotPeriphFunc = g_shadow + 16;
++		static constexpr uint32_t g_slotClockPtr = g_shadow + 24;
++		static constexpr int g_pushCount = static_cast<int>(std::size(g_trampolineSavedGPs)) + 1;
++		static constexpr int g_slotBytes = static_cast<int>(g_shadow) + 32;
++		static constexpr uint32_t g_additionalStackSize = static_cast<uint32_t>(g_slotBytes + (((8 - 8*g_pushCount - g_slotBytes) % 16 + 16) % 16));
++		static_assert(((8 - 8*g_pushCount - static_cast<int>(g_additionalStackSize)) % 16) == 0, "rsp must be 16 byte aligned at the call");
++		m_asm.sub(asmjit::x86::regs::rsp, asmjit::Imm(g_additionalStackSize));
++
++		const auto argDspPtr = r64(g_funcArgGPs[0]);
++		const auto argTarget = r64(g_funcArgGPs[1]);
++
++		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8), argDspPtr);
++		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotTarget, 8), argTarget);
++
++		const auto* const periphFunc = reinterpret_cast<const void*>(m_dsp.getExecPeripheralsFunc());
++		const auto* const targetClock = m_dsp.getPeriph(0)->getTargetClockPtr();
++
++		const auto ptrDspRegs = Jitmem::makeRelativePtr(&m_dsp.regs(), &m_dsp, argDspPtr, 8);
++		assert(ptrDspRegs.offset());
++		m_asm.lea(regDspPtr, ptrDspRegs);
++
++		m_asm.mov(asmjit::x86::rax, asmjit::Imm(periphFunc));
++		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotPeriphFunc, 8), asmjit::x86::rax);
++		m_asm.mov(asmjit::x86::rax, asmjit::Imm(targetClock));
++		m_asm.mov(asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotClockPtr, 8), asmjit::x86::rax);
++
++		const auto label = m_asm.newNamedLabel("beginExecUntilCycles");
++		m_asm.align(asmjit::AlignMode::kCode, 64);
++		m_asm.bind(label);
++
++		const auto dsp = asmjit::x86::rax;
++		const auto lCallInt = m_asm.newLabel();
++		const auto lSkipInt = m_asm.newLabel();
++		const auto scratchA = asmjit::x86::r10;
++		const auto scratchB = asmjit::x86::r11;
++
++		// 1) the interrupt func, with execPeriph()'s "target clock not reached" early-out inlined (as in the exec loop)
++		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
++		m_asm.mov(g_funcToCall, Jitmem::makeRelativePtr(&m_dsp.getInterruptFunc(), &m_dsp, dsp, 8));
++		m_asm.cmp(g_funcToCall, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotPeriphFunc, 8));
++		m_asm.jne(lCallInt);
++		m_asm.mov(scratchA, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotClockPtr, 8));
++		m_asm.mov(scratchB, asmjit::x86::ptr(scratchA, 0, 8));
++		m_asm.cmp(scratchB, Jitmem::makeRelativePtr(&m_dsp.getInstructionCounter(), &m_dsp, dsp, 8));
++		m_asm.ja(lSkipInt);
++		m_asm.bind(lCallInt);
++		m_asm.mov(g_funcArgGPs[0], dsp);
++		m_asm.call(g_funcToCall);
++		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
++		m_asm.bind(lSkipInt);
++
++		// 2) the block at the current PC: (DspRegs*, PC)
++		m_asm.mov(g_funcToCall, Jitmem::makeRelativePtr(&m_dsp.getJitEntries(), &m_dsp, dsp, 8));
++		m_asm.mov(r32(g_funcArgGPs[1]), Jitmem::makeRelativePtr(&m_dsp.regs().pc.var, &m_dsp, dsp, 4));
++		m_asm.mov(g_funcToCall, Jitmem::makePtr(g_funcToCall, g_funcArgGPs[1], 3, 8));
++		m_asm.mov(r64(g_funcArgGPs[0]), regDspPtr);
++		m_asm.call(g_funcToCall);
++
++		// 3) again while cycles < target
++		m_asm.mov(dsp, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotDsp, 8));
++		m_asm.mov(scratchA, asmjit::x86::ptr(asmjit::x86::regs::rsp, g_slotTarget, 8));
++		m_asm.cmp(Jitmem::makeRelativePtr(&m_dsp.getCycles(), &m_dsp, dsp, 8), scratchA);
++		m_asm.jb(label);
++
++		m_asm.add(asmjit::x86::regs::rsp, asmjit::Imm(g_additionalStackSize));
++		for (size_t i=std::size(g_trampolineSavedGPs); i-- > 0;)
++			m_asm.pop(r64(g_trampolineSavedGPs[i]));
++		m_asm.pop(r64(regDspPtr));
++
++		m_asm.ret();
++		m_asm.finalize();
++		m_runtime.add(&m_funcExecUntilCycles, &codeHolder);
++
++		if (auto* profiling = m_dsp.getJit().getProfilingSupport())
++			profiling->addFunction("trampolineExecUntilCycles", reinterpret_cast<void*>(m_funcExecUntilCycles), codeHolder);
++#endif
++	}
++
+ 	void JitTrampoline::generateExecOneFunc()
+ 	{
+ 		asmjit::CodeHolder codeHolder;
+diff --git a/source/dsp56kEmu/dsp.h b/source/dsp56kEmu/dsp.h
+--- a/source/dsp56kEmu/dsp.h
++++ b/source/dsp56kEmu/dsp.h
+@@ -226,6 +226,21 @@
+ 				execInterpreter();
+ 		}
+ 
++		// MS2000 PERF-DSP-2: "while(m_cycles < _targetCycles) exec();" with one trampoline entry for all the blocks
++		ASMJIT_FORCE_INLINE void execUntilCycles(const uint64_t _targetCycles) noexcept
++		{
++			if(m_cycles >= _targetCycles)
++				return;
++			if(g_useJIT && m_jit.getTrampoline().hasExecUntilCycles())
++			{
++				m_jit.getTrampoline().execUntilCycles(this, _targetCycles);
++				return;
++			}
++			do
++				exec();
++			while(m_cycles < _targetCycles);
++		}
++
+ 		ASMJIT_FORCE_INLINE void execJit() noexcept
+ 		{
+ 			m_interruptFunc(this);

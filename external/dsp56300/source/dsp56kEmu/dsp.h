@@ -226,6 +226,21 @@ namespace dsp56k
 				execInterpreter();
 		}
 
+		// MS2000 PERF-DSP-2: "while(m_cycles < _targetCycles) exec();" with one trampoline entry for all the blocks
+		ASMJIT_FORCE_INLINE void execUntilCycles(const uint64_t _targetCycles) noexcept
+		{
+			if(m_cycles >= _targetCycles)
+				return;
+			if(g_useJIT && m_jit.getTrampoline().hasExecUntilCycles())
+			{
+				m_jit.getTrampoline().execUntilCycles(this, _targetCycles);
+				return;
+			}
+			do
+				exec();
+			while(m_cycles < _targetCycles);
+		}
+
 		ASMJIT_FORCE_INLINE void execJit() noexcept
 		{
 			m_interruptFunc(this);
