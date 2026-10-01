@@ -275,6 +275,9 @@ private:
     // BUG110: {IPL or -1 = disabled, rank within the IPL} of the source behind a vector,
     // from IPRC/IPRP and UM Tables D-2/D-3.
     std::pair<int, int> interruptPriority(uint32_t vba);
+    std::pair<int, int> interruptPriorityCalc(uint32_t vba, uint32_t iprc, uint32_t iprp);   // PERF-DSP-1
+    int8_t  m_prioLevel[256] = {}; uint8_t m_prioRank[256] = {};
+    uint32_t m_prioIprc = 0, m_prioIprp = 0; bool m_prioValid = false;
     uint64_t m_unknownVectorTold[4] = {};
     std::string m_wavPath;            // MS2K_DSPWAV
     std::vector<int32_t> m_wav;       // interleaved L/R, 24-bit values sign-extended

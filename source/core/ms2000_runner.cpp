@@ -1082,8 +1082,12 @@ void Ms2kRunner::boot_startThreads() {
     postLog("[BOOT] Starting CPU & Audio threads\n");
     
     // fw5.txt I/O Scanner - enable for memory-mapped LCD discovery
-    IoProbe::enable();
-    postLog("[IO-SCAN] fw5.txt I/O scanner enabled for LCD address discovery\n");
+    // PERF-DSP-1 (2026-10-01): a hash-map update on every I/O register access, on by default since fw5 -
+    // R2: diagnostics default OFF. MS2K_IOSCAN=1 (or MS2K_IOTOP) turns it on.
+    if (std::getenv("MS2K_IOSCAN") || std::getenv("MS2K_IOTOP")) {
+        IoProbe::enable();
+        postLog("[IO-SCAN] fw5.txt I/O scanner enabled for LCD address discovery\n");
+    }
     
     // Threads will be started by the start() method
 }

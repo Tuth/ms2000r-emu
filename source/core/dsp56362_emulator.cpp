@@ -419,9 +419,15 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
                     TWord(m_periphX->read(base[c] - 2, Nop)), TWord(m_periphX->read(base[c] - 3, Nop)));
                 printf("\n");
             }
-            const auto t0 = std::chrono::steady_clock::now();
-            m_periphX->getDMA().trigger(dsp56k::DmaChannel::RequestSource::ExternalIRQD);
-            m_irqdNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            // PERF-DSP-1: two clock reads per edge (~130 k edges/s) only when asked for, MS2K_IRQDTIME=1
+            static const bool timeIt = [] { const char* e = std::getenv("MS2K_IRQDTIME"); return e && *e == '1'; }();
+            if (timeIt) {
+                const auto t0 = std::chrono::steady_clock::now();
+                m_periphX->getDMA().trigger(dsp56k::DmaChannel::RequestSource::ExternalIRQD);
+                m_irqdNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            } else {
+                m_periphX->getDMA().trigger(dsp56k::DmaChannel::RequestSource::ExternalIRQD);
+            }
         }
         m_pb0High = out ? pb0 : false;
     });
@@ -775,14 +781,37 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
 // BUG110. Level of each source from IPRC ($FFFFFF) / IPRP ($FFFFFE), field 00 = disabled, 01/10/11 =
 // IPL 0/1/2 (UM rev.3 equates p.B-5/B-6, Fig. 4-2); vectors from Table D-2 (p.D-6/D-7); rank = the
 // order of Table D-3 (p.D-8/D-9), lower is served first within an IPL.
+// PERF-DSP-1 (2026-10-01): the library asks this for every pending request on every exec() while one is
+// pending (masked requests stay pending through the whole IRQB job) - two peripheral-bus reads and a switch
+// each time. The answer depends only on (vba, IPRC, IPRP): kept as a 256-entry table, rebuilt when either
+// register differs from the values it was built from. Same results, same one-shot report for reserved vectors.
 std::pair<int, int> DSP56362Emulator::interruptPriority(uint32_t vba)
+{
+    if (vba >= 0x100) return interruptPriorityCalc(vba, 0, 0);
+    if (vba < 0x10) return { 3, int(vba >> 1) };
+    const TWord iprc = m_periphX->read(0xFFFFFF, Nop);
+    const TWord iprp = m_periphX->read(0xFFFFFE, Nop);
+    if (!m_prioValid || iprc != m_prioIprc || iprp != m_prioIprp) {
+        for (uint32_t v = 0; v < 0x100; ++v) {
+            const auto p = interruptPriorityCalc(v, iprc, iprp);
+            m_prioLevel[v] = int8_t(p.first); m_prioRank[v] = uint8_t(p.second);
+        }
+        m_prioIprc = iprc; m_prioIprp = iprp; m_prioValid = true;
+    }
+    const int lvl = m_prioLevel[vba];
+    if (lvl < 0 && m_prioRank[vba] == 0xFF && !(m_unknownVectorTold[vba >> 6] & (1ull << (vba & 63)))) {
+        m_unknownVectorTold[vba >> 6] |= 1ull << (vba & 63);
+        printf("[DSP56362] BUG110: request on reserved vector $%02X - no source in Table D-2, dropped\n", vba);
+    }
+    return { lvl, lvl < 0 && m_prioRank[vba] == 0xFF ? 0 : int(m_prioRank[vba]) };
+}
+
+std::pair<int, int> DSP56362Emulator::interruptPriorityCalc(uint32_t vba, TWord iprc, TWord iprp)
 {
     if (vba < 0x10) {
         // level 3: RESET, stack error, illegal, debug, trap, NMI, 2 reserved - Table D-3 order = vector order
         return { 3, int(vba >> 1) };
     }
-    const TWord iprc = m_periphX->read(0xFFFFFF, Nop);
-    const TWord iprp = m_periphX->read(0xFFFFFE, Nop);
     auto lvl = [](TWord reg, int bit) { const int f = int((reg >> bit) & 3); return f - 1; };
 
     switch (vba) {
@@ -824,12 +853,8 @@ std::pair<int, int> DSP56362Emulator::interruptPriority(uint32_t vba)
     if (vba >= 0x64 && vba < 0x100)
         return { lvl(iprp, 4), 24 };                       // HDI08 host command (HCVR sets the vector)
 
-    // Reserved in Table D-2. Nothing on this board should request it - say so once, loudly.
-    if (vba < 0x100 && !(m_unknownVectorTold[vba >> 6] & (1ull << (vba & 63)))) {
-        m_unknownVectorTold[vba >> 6] |= 1ull << (vba & 63);
-        printf("[DSP56362] BUG110: request on reserved vector $%02X - no source in Table D-2, dropped\n", vba);
-    }
-    return { -1, 0 };
+    // Reserved in Table D-2. Nothing on this board should request it - interruptPriority() says so once, loudly.
+    return { -1, 0xFF };   // rank 0xFF marks "reserved" for the caller; reported as rank 0 as before
 }
 
 void DSP56362Emulator::setPortReset(bool high)
