@@ -419,7 +419,16 @@ public:
     const H8SFlags& getFlags() const { return m_flags; }
     
     // Memory access (updated based on MAME)
-    uint8_t readByte(uint32_t address);
+    // PERF-MCU-11 (2026-10-01): the instruction-byte window (PERF-MCU-1) inline - executors re-read their own bytes
+    // constantly and the out-of-line readByte() paid a large frame for it (10 % of the MCU profile, most of it here).
+    uint8_t readByte(uint32_t address) {
+        if (m_insnRawOn) {
+            const uint32_t d = address - m_busPc0;
+            if (d < m_busInsnSize) return m_insnRaw[d];
+        }
+        return readByteBus(address);
+    }
+    uint8_t readByteBus(uint32_t address);   // everything else: the bus path, unchanged
     uint16_t readWord(uint32_t address);
     uint32_t readLong(uint32_t address);
     void writeByte(uint32_t address, uint8_t value);
@@ -757,6 +766,7 @@ public:
     // i16.txt Minimum Viable IRQ system
     static constexpr int MAX_VEC = 256;
     std::bitset<MAX_VEC> m_irq_pending;
+    uint64_t m_irqWords[4] = {};      // PERF-MCU-13: the same bits as m_irq_pending, as words (irqTryService scans set bits only)
     uint32_t m_irqPendingCount = 0;   // PERF-MCU-10: == m_irq_pending.count(); irqRaise/irqClear are the only writers (bitset::any() looped over 4 words, 2.4 % of the MCU profile)
     bool m_irq_in_service = false;
     uint32_t m_tpu2_tick_accum = 0;   // TPU2 TGI2A periodic-tick cycle accumulator (timer IRQ)
@@ -1212,7 +1222,8 @@ private:
     // mode changes) and reset() bump m_dcacheGen; a DRAM write into a page holding cached code bumps
     // that page's generation and the previous page's (an instruction is up to 10 bytes long).
     // MS2K_DCACHE=off decodes every instruction afresh (A/B).
-    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu; uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; uint8_t fk = 0; uint8_t raw[10] = {}; H8S2350InstructionExecutor::DirectFn fn = nullptr; H8S2350Instruction insn; };
+    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu;
+                                          uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; uint8_t fk = 0; uint8_t raw[10] = {}; H8S2350InstructionExecutor::DirectFn fn = nullptr; H8S2350Instruction insn; };
     // PERF-MCU-1 (2026-10-01): the executors re-read their own instruction bytes through readByte()
     // (opcode, register fields, immediates, absolute addresses) - the whole bus path per byte. The
     // cache entry now keeps the bytes it decoded; while the instruction executes, readByte() answers

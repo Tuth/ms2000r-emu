@@ -38,6 +38,15 @@ extern "C" void ms2k_phase(const char* p) { g_ms2kPhase = p; }
 #include <chrono>     // For system_clock (RTC)
 
 extern bool g_h8s_quiet_boot;   // h8s2350_instructions.cpp (global namespace) - PERF-MCU-3
+// PERF-MCU-11/13: portable spellings (the core also builds with GCC/Clang on Linux)
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define MS2K_FORCEINLINE __forceinline
+static inline int ms2kCtz64(uint64_t v) { unsigned long b; _BitScanForward64(&b, v); return int(b); }
+#else
+#define MS2K_FORCEINLINE inline __attribute__((always_inline))
+static inline int ms2kCtz64(uint64_t v) { return __builtin_ctzll(v); }
+#endif
 uint64_t g_ms2kTickNowCalls = 0;   // PERF-MCU: tickPeripheralsNow() calls, MS2K_OPHIST report
 uint64_t g_ms2kTickWhy[3] = {}, g_ms2kBudgetLog2[32] = {}, g_ms2kBudgetWhoN[32] = {};
 int g_ms2kBudgetWho = 0;
@@ -1805,12 +1814,8 @@ uint32_t H8S2350Emulator::busInsnStates(uint32_t pc, uint32_t size, uint8_t op0,
     return fetch + data + idle + refresh;
 }
 
-uint8_t H8S2350Emulator::readByte(uint32_t address)
+uint8_t H8S2350Emulator::readByteBus(uint32_t address)   // PERF-MCU-11: readByte() minus its inline window test
 {
-    if (m_insnRawOn) {   // PERF-MCU-1: the executing instruction's own bytes, as decoded
-        const uint32_t d = address - m_busPc0;
-        if (d < m_busInsnSize) return m_insnRaw[d];
-    }
     if (g_ms2kBusData && m_busInExec && !m_busDepth) busRecord(address, false, false);
 #ifdef MS2K_DIAG_ADDR24   // PERF-124: a call on every bus access cost ~4 % of real time; build-time only now
     addr24Report(address, m_effectivePC, false);
@@ -6192,7 +6197,7 @@ uint8_t H8S2350Emulator::fusedKind(const H8S2350Instruction& insn, const uint8_t
     if (H8S2350InstructionExecutor::directHandler(insn.opcode)) return FK_CALL;   // PERF-MCU-6: routed by decoded opcode alone
     return FK_NONE;
 }
-static inline bool ms2kCcTake(const H8SFlags& f, unsigned cc)
+static MS2K_FORCEINLINE bool ms2kCcTake(const H8SFlags& f, unsigned cc)   // PERF-MCU-11: was not inlined (1.2 %)
 {
     const bool C = f.carry, Z = f.zero, N = f.negative, V = f.overflow;
     switch (cc & 0xFu) {
@@ -13482,7 +13487,7 @@ void H8S2350Emulator::irqRaise(int vec)
         }
     }
     if (vec >= 0 && vec < MAX_VEC) {
-        if (!m_irq_pending.test(vec)) { m_irq_pending.set(vec); ++m_irqPendingCount; }   // PERF-MCU-10: count kept with the bits
+        if (!m_irq_pending.test(vec)) { m_irq_pending.set(vec); m_irqWords[vec >> 6] |= 1ull << (vec & 63); ++m_irqPendingCount; }   // PERF-MCU-10: count kept with the bits
         if (m_trace) printf("[IRQ] Raised vector %d (0x%02X)\n", vec, vec);
     }
     // Replay Debugger: Record IRQ raise
@@ -13494,7 +13499,7 @@ void H8S2350Emulator::irqRaise(int vec)
 void H8S2350Emulator::irqClear(int vec)
 {
     if (vec >= 0 && vec < MAX_VEC) {
-        if (m_irq_pending.test(vec)) { m_irq_pending.reset(vec); --m_irqPendingCount; }   // PERF-MCU-10
+        if (m_irq_pending.test(vec)) { m_irq_pending.reset(vec); m_irqWords[vec >> 6] &= ~(1ull << (vec & 63)); --m_irqPendingCount; }   // PERF-MCU-10
     }
     // Replay Debugger: Record IRQ clear
     if (m_record_mode && m_replay_logger) {
@@ -13632,10 +13637,12 @@ void H8S2350Emulator::irqTryService()
         // it at all.
         const uint8_t mask = uint8_t(m_registers.exr & 0x07);
         int bestLevel = -1;
-        for (int i = 0; i < MAX_VEC; i++) {
-            if (!m_irq_pending.test(i)) continue;
-            const int lvl = irqSourceLevel(i);
-            if (lvl > bestLevel) { bestLevel = lvl; vec = i; }   // > keeps the lowest vector on a tie
+        for (int w = 0; w < 4; ++w) {   // PERF-MCU-13: the set bits in ascending order, as the 0..255 test loop was
+            for (uint64_t bits = m_irqWords[w]; bits; bits &= bits - 1) {
+                const int i = w * 64 + ms2kCtz64(bits);
+                const int lvl = irqSourceLevel(i);
+                if (lvl > bestLevel) { bestLevel = lvl; vec = i; }   // > keeps the lowest vector on a tie
+            }
         }
         if (vec < 0) return;
         if (m_irq_pending.test(85) && vec != 85) {   // PURE-MODEL-MIDI-OVERRUN instrument
@@ -13662,8 +13669,8 @@ void H8S2350Emulator::irqTryService()
         // BUG114: `if (m_irq_in_service) return; // Simple non-nested model` stood here - a
         // global lock the part does not have. Mode 0 (HM 5.4.2, RENDERED p.145) masks with
         // CCR.I, which acceptance sets to 1 below; a handler that clears I may be nested.
-        for (int i = 0; i < MAX_VEC; i++) {
-            if (m_irq_pending.test(i)) { vec = i; break; }
+        for (int w = 0; w < 4 && vec < 0; ++w) {   // PERF-MCU-13: the lowest set bit
+            if (m_irqWords[w]) vec = w * 64 + ms2kCtz64(m_irqWords[w]);
         }
         if (vec < 0) return;
     }
