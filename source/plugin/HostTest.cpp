@@ -23,11 +23,12 @@ bool g_echo = false;             // SYX-1b: the plugin's MIDI OUT fed back into 
 juce::MidiBuffer g_echoBuf;
 // MIDI-CLOCK: a host transport - 140 BPM, playing for the first half of the run, stopped for the second
 struct TestHead : juce::AudioPlayHead {
-    double bpm = 140.0, rate = 44100.0; int64_t pos = 0, stopAt = 0;
+    double bpm = 140.0, rate = 44100.0; int64_t pos = 0, startAt = 0, stopAt = 0;
     juce::Optional<PositionInfo> getPosition() const override
     {
         PositionInfo p; p.setBpm(bpm); p.setTimeInSamples(pos);
-        p.setIsPlaying(pos < stopAt); p.setPpqPosition(double(pos) / rate * bpm / 60.0);
+        // plays from startAt to stopAt, its ppq starting at 0.3 (not on a beat): FA must wait for ppq 1.0
+        p.setIsPlaying(pos >= startAt && pos < stopAt); p.setPpqPosition(0.3 + double(pos - startAt) / rate * bpm / 60.0);
         return p;
     }
 };
@@ -173,7 +174,7 @@ int main(int argc, char** argv)
 
     if (mode == "syx" || mode == "syxecho") g_pump = true;
     TestHead head;
-    if (mode == "clock") { head.rate = rate; head.stopAt = int64_t(secs * rate / 2); g_head = &head; inst->setPlayHead(&head); }
+    if (mode == "clock") { head.rate = rate; head.startAt = int64_t(5.0 * rate); head.stopAt = int64_t(secs * rate * 0.75); g_head = &head; inst->setPlayHead(&head); }
     if (mode == "syxecho") g_echo = true;   // SYX-1: MS2K_SYXIMPORT / MS2K_SYXEXPORT act from the plugin's timer
     const int total = int(secs * rate);
     juce::AudioBuffer<float> out(2, juce::jmax(1, total));

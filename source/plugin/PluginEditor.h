@@ -7,7 +7,7 @@
 #include "core/lcd_gui.h"
 #include "gui/vector_panel.h"
 
-class Ms2kEditor : public juce::AudioProcessorEditor, private juce::Timer
+class Ms2kEditor : public juce::AudioProcessorEditor, private juce::Timer, private juce::ListBoxModel
 {
 public:
     explicit Ms2kEditor(Ms2kProcessor& p);
@@ -65,6 +65,16 @@ private:
     juce::TextButton m_demo{ "Demo songs  (EXIT + GLOBAL)" };
     juce::TextButton m_syxLoad{ "Load .syx..." }, m_syxSave{ "Save all programs as .syx..." };
     juce::Label m_syxStatus;
+    juce::ToggleButton m_transport{ "Host transport -> Start / Stop  (the arpeggiator starts on a quarter note with the host)" };
+    // LIBRARY-1: the programs of a .syx file; a click sends one to the edit buffer
+    juce::TextButton m_tabLibrary{ "Library" }, m_libOpen{ "Open .syx..." };
+    juce::ListBox m_list{ "programs", nullptr };
+    juce::Label m_libFile, m_libStatus;
+    std::vector<MS2000::SyxTool::Program> m_programs;
+    void loadLibrary(const juce::String& path);
+    int getNumRows() override { return int(m_programs.size()); }
+    void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected) override;
+    void listBoxItemClicked(int row, const juce::MouseEvent&) override;
     juce::TextButton m_homeBtn{ "Choose the MS2000 folder..." };
     std::unique_ptr<juce::FileChooser> m_chooser;
     juce::Label m_help, m_status;

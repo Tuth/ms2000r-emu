@@ -704,9 +704,9 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
             static unsigned secs = 0; static uint64_t ovrSeen = 0; ++secs;
             const bool ovrNew = m_shiOverruns != ovrSeen; ovrSeen = m_shiOverruns;
             if (told < 60 || ovrNew || secs % 30 == 0) { ++told;
-                printf("[DSP56362] t=%.2f s: PC=%06X core=%llu Hz instr=%llu cycles=%llu TX frames=%llu "
+                printf("[DSP56362] t=%.2f s: PC=%06X SR=%06X core=%llu Hz instr=%llu cycles=%llu TX frames=%llu "
                        "IRQB edges=%llu IRQD(PB0) edges=%llu (%.3f s in DMA) exec()=%llu SHI words in=%llu (RX overruns %llu) wall=%.2f s\n",
-                       double(m_mcuCyclesRun) / double(mcuHz), m_dsp->getPC().toWord(),
+                       double(m_mcuCyclesRun) / double(mcuHz), m_dsp->getPC().toWord(), m_dsp->getSR().toWord(),
                        (unsigned long long)coreHz(),
                        (unsigned long long)m_dsp->getInstructionCounter(),
                        (unsigned long long)m_dsp->getCycles(), (unsigned long long)m_txFrames,

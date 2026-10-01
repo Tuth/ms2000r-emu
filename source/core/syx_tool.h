@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <algorithm>
 
 namespace MS2000 {
 
@@ -74,6 +75,70 @@ public:
         m_name = baseName(path); m_next = 0; m_skipped = skipped;
         begin(Import);
         return true;
+    }
+
+    // LIBRARY-1: one program (254 bytes, TABLE 1) into the EDIT BUFFER as CURRENT PROGRAM DATA DUMP (40) - the
+    // machine's memory is not touched; WRITE on the panel stores it like any edit.
+    bool startProgram(const std::vector<uint8_t>& prog, const std::string& name)
+    {
+        if (busy() || prog.size() != 254) return false;
+        std::vector<uint8_t> m = { 0xF0, 0x42, 0x30, 0x58, 0x40 };
+        const auto enc = encode7(prog); m.insert(m.end(), enc.begin(), enc.end()); m.push_back(0xF7);
+        m_msgs.assign(1, m); m_name = name; m_next = 0; m_skipped = 0;
+        begin(Import);
+        return true;
+    }
+
+    // LIBRARY-1: the programs of a .syx file - a PROGRAM DATA DUMP (4C, 128 x 254 bytes), an ALL DATA DUMP (50,
+    // the same + Global) or a CURRENT PROGRAM DATA DUMP (40, one). Names = bytes 0-11 of each (TABLE 1).
+    struct Program { std::string name; std::vector<uint8_t> data; };
+    static bool parsePrograms(const std::string& path, std::vector<Program>& out, std::string& err)
+    {
+        out.clear();
+        std::vector<uint8_t> f;
+        if (FILE* fp = std::fopen(path.c_str(), "rb")) {
+            uint8_t buf[4096]; size_t n;
+            while ((n = std::fread(buf, 1, sizeof buf, fp)) > 0) f.insert(f.end(), buf, buf + n);
+            std::fclose(fp);
+        } else { err = "Cannot open " + path; return false; }
+        for (size_t i = 0; i + 6 < f.size(); ++i) {
+            if (f[i] != 0xF0 || f[i + 1] != 0x42 || (f[i + 2] & 0xF0) != 0x30 || f[i + 3] != 0x58) continue;
+            size_t j = i + 5; while (j < f.size() && f[j] != 0xF7) ++j;
+            if (j >= f.size()) break;
+            const uint8_t fn = f[i + 4];
+            const auto d = decode7(std::vector<uint8_t>(f.begin() + ptrdiff_t(i) + 5, f.begin() + ptrdiff_t(j)));
+            const size_t count = fn == 0x40 ? 1 : (fn == 0x4C || fn == 0x50) ? 128 : 0;
+            for (size_t k = 0; k < count && (k + 1) * 254 <= d.size(); ++k) {
+                Program p; p.data.assign(d.begin() + ptrdiff_t(k * 254), d.begin() + ptrdiff_t((k + 1) * 254));
+                for (int c = 0; c < 12; ++c) { const uint8_t ch = p.data[size_t(c)]; p.name += (ch >= 0x20 && ch < 0x7F) ? char(ch) : ' '; }
+                while (!p.name.empty() && p.name.back() == ' ') p.name.pop_back();
+                out.push_back(std::move(p));
+            }
+            i = j;
+        }
+        if (out.empty()) { err = "No MS2000 programs in " + baseName(path); return false; }
+        return true;
+    }
+    // NOTE 6: 7 data bytes <-> 8 MIDI bytes (the first carries the 7 top bits, b0 = the first byte's)
+    static std::vector<uint8_t> decode7(const std::vector<uint8_t>& m)
+    {
+        std::vector<uint8_t> d;
+        for (size_t i = 0; i < m.size(); i += 8) {
+            const uint8_t hi = m[i];
+            for (size_t k = 1; k < 8 && i + k < m.size(); ++k) d.push_back(uint8_t(m[i + k] | (((hi >> (k - 1)) & 1) << 7)));
+        }
+        return d;
+    }
+    static std::vector<uint8_t> encode7(const std::vector<uint8_t>& d)
+    {
+        std::vector<uint8_t> m;
+        for (size_t i = 0; i < d.size(); i += 7) {
+            uint8_t hi = 0; const size_t n = std::min<size_t>(7, d.size() - i);
+            for (size_t k = 0; k < n; ++k) hi |= uint8_t(((d[i + k] >> 7) & 1) << k);
+            m.push_back(hi);
+            for (size_t k = 0; k < n; ++k) m.push_back(uint8_t(d[i + k] & 0x7F));
+        }
+        return m;
     }
 
     // Requests all 128 programs and writes them to path when they arrive.

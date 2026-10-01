@@ -69,6 +69,18 @@ void Ms2kProcessor::timerCallback()
     m_syx.poll();
     static const char* imp = std::getenv("MS2K_SYXIMPORT");
     static const char* exp = std::getenv("MS2K_SYXEXPORT");
+    static const char* prg = std::getenv("MS2K_SYXPROGRAM");   // LIBRARY-1 diag: "<file>|<index>" after 5 s
+    if (prg && m_syxDiag == 0 && m_frames.load() > uint64_t(5.0 * m_hostRate)) {
+        m_syxDiag = 1;
+        const std::string a(prg); const auto bar = a.rfind('|');
+        std::vector<MS2000::SyxTool::Program> pr; std::string err;
+        if (bar != std::string::npos && MS2000::SyxTool::parsePrograms(a.substr(0, bar), pr, err)) {
+            const size_t k = size_t(std::atoi(a.c_str() + bar + 1));
+            std::printf("[SYX] library: %zu programs, sending #%zu '%s'\n", pr.size(), k, k < pr.size() ? pr[k].name.c_str() : "?");
+            if (k < pr.size()) m_syx.startProgram(pr[k].data, pr[k].name);
+        } else std::printf("[SYX] library: %s\n", err.c_str());
+    }
+    if (prg && m_syxDiag == 1 && !m_syx.busy()) { m_syxDiag = 3; std::printf("[SYX] %s\n", m_syx.status().c_str()); std::fflush(stdout); }
     if (!imp && !exp) return;
     static uint64_t f0 = 0;
     if (m_syxDiag == 0 && m_frames.load() > uint64_t(5.0 * m_hostRate)) { m_syxDiag = 1; f0 = m_frames.load(); if (imp) m_syx.startImport(imp); }
@@ -249,7 +261,11 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     // MIDI-CLOCK (2026-10-01, Tamas: with Global MIDI Clock = Ext the tempo went to 0 - a VST3 host sends no MIDI
     // clock, only its tempo): the host's tempo as F8 timing clocks, 24 per quarter, into MIDI IN at their sample.
     // Phase-locked to the host's ppq position while it plays; free-running at its tempo while it is stopped, so
-    // the arpeggiator keeps time either way. No Start/Stop/SPP (FA/FC/F2) are sent. Settings: on/off.
+    // the arpeggiator keeps time either way. Settings: on/off.
+    // MIDI-CLOCK b (Tamas: the beat position too): the MS2000 receives F8, FA Start and FC Stop ("Arpeggiator stop")
+    // with Clock = External/Auto - no Song Position (MIDI Implementation, RECOGNIZED REALTIME). So when the host
+    // starts playing (or jumps, e.g. a loop), FA goes out just before the first clock that falls on a quarter-note
+    // boundary of the host's ppq, and that clock is beat 1 for the machine; when the host stops, FC. Settings.
     if (hostClock) {
         double bpm = 0.0, ppq = 0.0; bool playing = false;
         if (auto* ph = getPlayHead())
@@ -260,10 +276,17 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (bpm > 1.0) {
             const double tps = bpm / 60.0 * 24.0 / m_hostRate;            // clocks per host sample
             const double t0 = playing ? ppq * 24.0 : m_clockTick, t1 = t0 + tps * double(N);
-            static const uint8_t f8 = 0xF8;
-            for (double k = std::ceil(t0 - 1e-9); k < t1; k += 1.0)
-                midi.addEvent(&f8, 1, juce::jlimit(0, N - 1, int((k - t0) / tps)));
+            static const uint8_t f8 = 0xF8, fa = 0xFA, fc = 0xFC;
+            const bool tr = transportMsgs.load();
+            if (playing && (!m_wasPlaying || std::abs(t0 - m_clockTick) > 1.0)) m_startPending = tr;   // start or jump
+            if (!playing && m_wasPlaying && tr) midi.addEvent(&fc, 1, 0);
+            for (double k = std::ceil(t0 - 1e-9); k < t1; k += 1.0) {
+                const int at = juce::jlimit(0, N - 1, int((k - t0) / tps));
+                if (m_startPending && playing && (llround(k) % 24) == 0) { midi.addEvent(&fa, 1, at); m_startPending = false; }
+                midi.addEvent(&f8, 1, at);
+            }
             m_clockTick = t1;
+            m_wasPlaying = playing;
         }
     }
 
@@ -359,6 +382,8 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("mic2", mic2, nullptr); t.setProperty("dac20", dac20, nullptr);
     t.setProperty("editorW", editorW, nullptr); t.setProperty("editorTab", editorTab, nullptr);
     t.setProperty("hostClock", hostClock.load(), nullptr);
+    t.setProperty("transportMsgs", transportMsgs.load(), nullptr);
+    t.setProperty("libraryPath", libraryPath, nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
     else if (m_haveProjectFlash && m_projectMask) { mask = m_projectMask; img = m_projectImage.data(); }
@@ -389,6 +414,8 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     mic2 = bool(t.getProperty("mic2", false)); dac20 = bool(t.getProperty("dac20", false));
     editorW = int(t.getProperty("editorW", 0)); editorTab = int(t.getProperty("editorTab", 0));
     hostClock = bool(t.getProperty("hostClock", true));
+    transportMsgs = bool(t.getProperty("transportMsgs", true));
+    libraryPath = t.getProperty("libraryPath", "").toString();
 
     // the flash this project's machine had
     const uint32_t mask = uint32_t(int(t.getProperty("flashMask", 0))) & ((1u << MS2000::FlashROM::NUM_SECTORS) - 1u);

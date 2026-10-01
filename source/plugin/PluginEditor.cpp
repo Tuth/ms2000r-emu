@@ -141,13 +141,32 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     }
     setupIo();
 
-    for (auto* b : { &m_tabPanel, &m_tabSettings }) { b->setClickingTogglesState(false); b->setRadioGroupId(0); addAndMakeVisible(*b); }
+    for (auto* b : { &m_tabPanel, &m_tabSettings, &m_tabLibrary }) { b->setClickingTogglesState(false); b->setRadioGroupId(0); addAndMakeVisible(*b); }
+    m_tabLibrary.onClick = [this] { showTab(2); };
     m_tabPanel.onClick = [this] { showTab(0); };
     m_tabSettings.onClick = [this] { showTab(1); };
     m_mic2.setToggleState(m_proc.mic2, juce::dontSendNotification);
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
     m_clock.setToggleState(m_proc.hostClock.load(), juce::dontSendNotification);
     m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); };
+    m_transport.setToggleState(m_proc.transportMsgs.load(), juce::dontSendNotification);
+    m_transport.onClick = [this] { m_proc.transportMsgs = m_transport.getToggleState(); };
+    m_transport.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_transport);
+    // LIBRARY-1
+    m_list.setModel(this);
+    m_list.setRowHeight(22);
+    m_list.setColour(juce::ListBox::backgroundColourId, juce::Colour(24, 30, 34));
+    for (auto* l : { &m_libFile, &m_libStatus }) { l->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)); addChildComponent(*l); }
+    addChildComponent(m_libOpen); addChildComponent(m_list);
+    m_libOpen.onClick = [this] {
+        m_chooser = std::make_unique<juce::FileChooser>("A .syx with MS2000 programs", juce::File(m_proc.libraryPath), "*.syx");
+        m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this](const juce::FileChooser& fc) {
+            const auto f = fc.getResult();
+            if (f.existsAsFile()) loadLibrary(f.getFullPathName());
+        });
+    };
+    if (m_proc.libraryPath.isNotEmpty()) loadLibrary(m_proc.libraryPath);
     m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); };
     m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); };
     m_syxLoad.onClick = [this] {
@@ -190,7 +209,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     setResizeLimits(700, 380, 3840, 2160);
     const int w = m_proc.editorW >= 700 ? m_proc.editorW : 1400;
     setSize(w, int(std::lround(w * VPanel::kH / VPanel::kW)) + kTabH);
-    showTab(m_proc.editorTab == 1 ? 1 : 0);
+    showTab(m_proc.editorTab >= 0 && m_proc.editorTab <= 2 ? m_proc.editorTab : 0);
     if (const char* e = std::getenv("MS2K_EDITORSHOT"); e && *e) { m_shotPath = e; m_testTick = 0; showTab(0); }
     if (const char* e = std::getenv("MS2K_EDITORTEST"); e && *e) m_testMode = e;
     startTimerHz(30);
@@ -216,8 +235,11 @@ void Ms2kEditor::showTab(int t)
     m_tab = t; m_proc.editorTab = t;
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
+    m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
+    m_transport.setVisible(t == 1);
+    for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
-    if (t == 1) { m_io.releaseAll(); m_mouse.active.clear(); }
+    if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
     m_dirty = true; repaint();
 }
 
@@ -232,10 +254,18 @@ void Ms2kEditor::resized()
 {
     m_tabPanel.setBounds(6, 4, 90, kTabH - 8);
     m_tabSettings.setBounds(100, 4, 90, kTabH - 8);
+    m_tabLibrary.setBounds(194, 4, 90, kTabH - 8);
+    {   // LIBRARY-1
+        auto lr = getLocalBounds().withTrimmedTop(kTabH).reduced(24, 12);
+        auto top = lr.removeFromTop(30); m_libOpen.setBounds(top.removeFromLeft(150)); top.removeFromLeft(12); m_libFile.setBounds(top);
+        m_libStatus.setBounds(lr.removeFromBottom(26));
+        lr.removeFromTop(8); m_list.setBounds(lr);
+    }
     auto r = getLocalBounds().withTrimmedTop(kTabH).reduced(24, 16);
     m_mic2.setBounds(r.removeFromTop(30));
     m_dac20.setBounds(r.removeFromTop(30));
     m_clock.setBounds(r.removeFromTop(30));
+    m_transport.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
     m_demo.setBounds(r.removeFromTop(30).withWidth(300));
     r.removeFromTop(10);
@@ -345,6 +375,10 @@ void Ms2kEditor::timerCallback()
             std::memcmp(s.cgram, m_lcd.cgram, sizeof s.cgram) || s.displayOn != m_lcd.displayOn) changed = true;
         m_lcd = s;
     }
+    if (m_tab == 2) {
+        const juce::String ls(m_proc.syx().status());
+        if (ls != m_libStatus.getText()) m_libStatus.setText(ls, juce::dontSendNotification);
+    }
     if (m_tab == 1) {
         const juce::String ss(m_proc.syx().status());
         if (ss != m_syxStatus.getText()) m_syxStatus.setText(ss, juce::dontSendNotification);
@@ -387,7 +421,7 @@ void Ms2kEditor::paint(juce::Graphics& g)
 {
     const double t0 = juce::Time::getMillisecondCounterHiRes();
     g.fillAll(kBg);
-    if (m_tab == 1) { g.setColour(col(VPanel::cPanel())); g.fillRect(getLocalBounds().withTrimmedTop(kTabH)); return; }
+    if (m_tab != 0) { g.setColour(col(VPanel::cPanel())); g.fillRect(getLocalBounds().withTrimmedTop(kTabH)); return; }
     const auto pa = panelArea();
     // the printed panel as a picture at the display's pixel scale, redrawn only when the size changes
     const float ps = juce::jmax(1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
@@ -420,4 +454,33 @@ void Ms2kEditor::paint(juce::Graphics& g)
                          box.reduced(18.0f).toNearestInt(), juce::Justification::centred, 6);
     }
     m_paintMs = juce::Time::getMillisecondCounterHiRes() - t0;
+}
+
+// ---- LIBRARY-1: the Library page ----
+void Ms2kEditor::loadLibrary(const juce::String& path)
+{
+    std::string err;
+    std::vector<MS2000::SyxTool::Program> progs;
+    if (!MS2000::SyxTool::parsePrograms(path.toStdString(), progs, err)) { m_libFile.setText(err, juce::dontSendNotification); return; }
+    m_programs = std::move(progs);
+    m_proc.libraryPath = path;
+    m_libFile.setText(juce::File(path).getFileName() + "  -  " + juce::String(int(m_programs.size())) + " programs. Click one: it goes into the edit buffer (the memory is not changed; WRITE stores it).",
+                      juce::dontSendNotification);
+    m_list.updateContent(); m_list.repaint();
+}
+
+void Ms2kEditor::paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected)
+{
+    if (row < 0 || row >= int(m_programs.size())) return;
+    if (selected) g.fillAll(juce::Colour(44, 96, 114));
+    const juce::String slot = m_programs.size() == 128 ? juce::String::charToString(juce::juce_wchar('A' + row / 16)) + juce::String(row % 16 + 1).paddedLeft('0', 2) : juce::String(row + 1);
+    g.setColour(juce::Colour(150, 170, 178)); g.setFont(juce::Font(15.0f)); g.drawText(slot, 8, 0, 44, h, juce::Justification::centredLeft);
+    g.setColour(juce::Colour(236, 242, 244)); g.setFont(juce::Font(15.0f, juce::Font::bold)); g.drawText(m_programs[size_t(row)].name, 56, 0, w - 60, h, juce::Justification::centredLeft);
+}
+
+void Ms2kEditor::listBoxItemClicked(int row, const juce::MouseEvent&)
+{
+    if (row < 0 || row >= int(m_programs.size())) return;
+    if (!m_proc.syx().startProgram(m_programs[size_t(row)].data, m_programs[size_t(row)].name))
+        m_libStatus.setText("Busy - wait for the transfer in progress", juce::dontSendNotification);
 }
