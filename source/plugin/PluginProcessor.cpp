@@ -184,6 +184,7 @@ bool Ms2kProcessor::startMachine()
     cfg.quietBoot = true;
     cfg.useMmcss = false;
     cfg.audio.enabled = false;
+    cfg.dspThread = true;                                   // DSP-THREAD: the DSP in parallel with the MCU
     cfg.flashStateSave = false;                              // the plugin's flash state lives in the project
     cfg.flashStateLoad = !m_haveProjectFlash;                // a fresh instance: the folder's, as the standalone
     if (m_haveProjectFlash && m_projectMask) { cfg.flashStateMask = m_projectMask; cfg.flashStateImage = m_projectImage; }

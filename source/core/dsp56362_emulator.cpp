@@ -126,8 +126,47 @@ void DSP56362Emulator::loadAudioInWav(const char* path)
            rate, rate == 48000 ? "" : " - NOT 48 kHz, played as is");
 }
 
+void DSP56362Emulator::startThread()
+{
+    if (m_thr.joinable() || !m_dsp) return;
+    m_fsShadow = m_fsAccum;
+    m_thrStop = false;
+    m_thr = std::thread([this] {
+        for (;;) {
+            const uint32_t d = m_qDone.load(std::memory_order_relaxed);
+            if (d != m_qHead.load(std::memory_order_acquire)) {
+                const DspReq r = m_q[d & (kQ - 1)];
+                runForMcuCycles(r.cycles, r.hz);
+                m_qDone.store(d + 1, std::memory_order_release);
+                continue;
+            }
+            if (m_thrStop.load(std::memory_order_acquire)) break;
+            // idle: spin a little (the next chunk is usually ~20 us of MCU time away), then sleep until posted
+            bool got = false;
+            for (int i = 0; i < 4000 && !got; ++i) { _mm_pause(); got = m_qHead.load(std::memory_order_acquire) != d; }
+            if (got) continue;
+            std::unique_lock<std::mutex> l(m_thrMx);
+            m_thrSleeping.store(true, std::memory_order_release);
+            m_thrCv.wait_for(l, std::chrono::milliseconds(1), [&] { return m_qHead.load(std::memory_order_acquire) != d || m_thrStop.load(); });
+            m_thrSleeping.store(false, std::memory_order_release);
+        }
+    });
+    printf("[DSP56362] DSP-THREAD: the DSP runs on its own thread\n");
+}
+
+void DSP56362Emulator::stopThread()
+{
+    if (!m_thr.joinable()) return;
+    drain();
+    { std::lock_guard<std::mutex> l(m_thrMx); m_thrStop = true; }
+    m_thrCv.notify_one();
+    m_thr.join();
+    m_fsAccum = m_fsShadow;   // the same value - every posted chunk has run
+}
+
 DSP56362Emulator::~DSP56362Emulator()
 {
+    stopThread();
     if (m_dsp) {
         printf("[DSP56362] end: %llu ESAI TX frames over %.3f s of MCU time, SHI words in %llu, RX overruns %llu\n",
                (unsigned long long)m_txFrames, double(m_mcuCyclesRun) / 10e6, (unsigned long long)m_wordsIn, (unsigned long long)m_shiOverruns);   // phi = 10 MHz
@@ -598,7 +637,7 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
             }
         } else
         while (m_dsp->getCycles() < m_cycleTarget) { m_dsp->exec(); ++m_execCalls; }
-        if (!m_batchOk) m_batchOk = (m_periphX->getEsaiClock().getPCTL() & (1u << 18)) != 0;   // PERF-131: PEN
+        if (!m_batchOk.load(std::memory_order_relaxed)) m_batchOk.store((m_periphX->getEsaiClock().getPCTL() & (1u << 18)) != 0, std::memory_order_relaxed);   // PERF-131: PEN
     } else {
         static TWord last = m_mem->get(watchArea, TWord(ywatch));
         static unsigned told = 0;
@@ -710,13 +749,14 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
                   printf("[DSP56362] WARNING: SR.SM (arithmetic saturation) is set at PC=%06X - the JIT does not model it\n", m_dsp->getPC().toWord()); } }
             if (told < 60 || ovrNew || secs % 30 == 0) { ++told;
                 printf("[DSP56362] t=%.2f s: PC=%06X SR=%06X core=%llu Hz instr=%llu cycles=%llu TX frames=%llu "
-                       "IRQB edges=%llu IRQD(PB0) edges=%llu (%.3f s in DMA) exec()=%llu SHI words in=%llu (RX overruns %llu) wall=%.2f s\n",
+                       "IRQB edges=%llu IRQD(PB0) edges=%llu (%.3f s in DMA) exec()=%llu SHI words in=%llu (RX overruns %llu) wall=%.2f s sync calls %llu runs %llu fs runs %llu\n",
                        double(m_mcuCyclesRun) / double(mcuHz), m_dsp->getPC().toWord(), m_dsp->getSR().toWord(),
                        (unsigned long long)coreHz(),
                        (unsigned long long)m_dsp->getInstructionCounter(),
                        (unsigned long long)m_dsp->getCycles(), (unsigned long long)m_txFrames,
                        (unsigned long long)m_irqbEdges, (unsigned long long)m_irqdEdges, double(m_irqdNs) * 1e-9, (unsigned long long)m_execCalls, (unsigned long long)m_wordsIn, (unsigned long long)m_shiOverruns,
-                       std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count()); }
+                       std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count(),
+                       (unsigned long long)m_syncCalls, (unsigned long long)m_syncRuns, (unsigned long long)m_fsRuns); }
         }
     }
     // ESAI output rate, measured against MCU time: the first frame, then every 48000.

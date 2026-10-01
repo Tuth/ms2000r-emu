@@ -1,3 +1,4 @@
+#include <chrono>
 // DIFFREF - instruction-level differential test: our H8S/2350 core vs the UKNTCH2000
 // reference core (local-only; see ref_wrap.c). One instruction per test, random but
 // reproducible register/flag/memory state, identical in both cores. Every field that
@@ -23,6 +24,8 @@ unsigned char* ref_ram(void);
 void ref_set(const unsigned er[8], unsigned pc, unsigned ccr, unsigned exr);
 void ref_get(unsigned er[8], unsigned* pc, unsigned* ccr, unsigned* exr);
 int ref_step(void);
+void ref_reset(void);
+long long ref_bench(long long n, unsigned* pcOut);
 int ref_nacc(void);
 void ref_acc(int i, unsigned* addr, unsigned* size, unsigned* write, unsigned* value);
 }
@@ -83,6 +86,29 @@ int main(int argc, char** argv)
 
     g_h8s_quiet_boot = true;
     H8S2350Emulator emu; emu.reset(); emu.setQuietBoot(true);
+    // PERF-REF (2026-10-01, measurement only): DIFFREF_BENCH=<steps> - both cores from the reset vector of
+    // flash.bin (current folder), n steps each, wall time per step. Ours: the whole step() (CPU + peripherals +
+    // bus model); the reference: H8SStepCPU only, tracing off, its peripherals stubbed (ref_wrap.c).
+    if (const char* bn = getenv("DIFFREF_BENCH")) {
+        const long long n = atoll(bn);
+        std::vector<uint8_t> img(0x100000, 0xFF);
+        if (FILE* f = fopen("flash.bin", "rb")) { fread(img.data(), 1, img.size(), f); fclose(f); } else { printf("no flash.bin\n"); return 2; }
+        ref_init(); memcpy(ref_ram(), img.data(), img.size()); ref_reset();
+        unsigned rpc = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        const long long rdone = ref_bench(n, &rpc);
+        const double rs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        H8S2350Emulator me; me.setQuietBoot(true);
+        if (!me.loadFirmwareFromFile("flash.bin")) { printf("our load failed\n"); return 2; }
+        me.reset();
+        t0 = std::chrono::steady_clock::now();
+        for (long long i = 0; i < n; ++i) me.step();
+        const double os = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        printf("[BENCH] reference: %lld steps in %.3f s = %.1f ns/step (%.1f M/s), PC now %06X\n", rdone, rs, rs * 1e9 / double(rdone > 0 ? rdone : 1), double(rdone) / rs / 1e6, rpc);
+        printf("[BENCH] ours     : %lld steps in %.3f s = %.1f ns/step (%.1f M/s), PC now %06X, MCU time %.3f s\n", n, os, os * 1e9 / double(n), double(n) / os / 1e6,
+               me.getRegisters().pc, double(me.getCycles()) / double(me.getClockFrequency()));
+        return 0;
+    }
     // DIFFREF_ONE="01 00 78 00 6B A3 00 40 14 5A" [DIFFREF_REGS="er0,er1,...,er7" hex] - run ONE
     // instruction on our core only and print every register and every byte of 0x400000-0x40FFFF
     // and FFF400-FFFBFF that changed. For forms the reference does not implement (78, 7B, ...).

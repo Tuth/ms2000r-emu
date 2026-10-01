@@ -72,5 +72,17 @@ int ref_step(void)
     return H8SStepCPU(&g_ref) ? 1 : 0;
 }
 int ref_nacc(void) { return g_nacc; }
+/* PERF-REF (2026-10-01, measurement only): the reference core's own speed - reset from the image in its RAM,
+   then n CPU steps with its tracing off; returns the steps done (-1 = it aborted). */
+void ref_reset(void) { H8SReset(&g_ref); }
+long long ref_bench(long long n, unsigned* pcOut)
+{
+    long long i = 0;
+    g_ref.trace = FALSE; g_refQuiet = 1;
+    if (setjmp(g_refJmp)) { *pcOut = g_ref.pc; return -1; }
+    for (; i < n; ++i) if (!H8SStepCPU(&g_ref)) break;
+    *pcOut = g_ref.pc;
+    return i;
+}
 void ref_acc(int i, unsigned* addr, unsigned* size, unsigned* write, unsigned* value)
 { *addr = g_acc[i].addr; *size = g_acc[i].size; *write = g_acc[i].write; *value = g_acc[i].value; }

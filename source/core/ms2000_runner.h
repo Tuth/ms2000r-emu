@@ -99,6 +99,7 @@ struct Ms2kConfig {
     // VST3-2: where the flash state (BUG126) comes from and goes to. The standalone uses the files beside
     // the ROM; the plugin keeps it in the host project: flashStateMask != 0 -> those sectors are taken from
     // flashStateImage (FLASH_SIZE bytes) instead of the file. MS2K_FLASHSTATE=off still overrides all of it.
+    bool        dspThread = false;          // DSP-THREAD: render() mode runs the DSP on its own thread
     bool        flashStateLoad = true;      // take ms2000_flash_state.bin/.sectors at init
     bool        flashStateSave = true;      // write them at stop
     uint32_t    flashStateMask = 0;

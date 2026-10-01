@@ -483,6 +483,11 @@ bool Ms2kRunner::startManual() {
     m_manual = true;
     if (m_cpu && m_cpu->dsp()) m_cpu->dsp()->enableAudioRing(true);
     m_cpu->reset();
+    {   // DSP-THREAD: the DSP on its own thread (cfg.dspThread; MS2K_DSPTHREAD=0/1 overrides - A/B)
+        bool on = m_cfg.dspThread;
+        if (const char* e = std::getenv("MS2K_DSPTHREAD"); e && *e) on = *e == '1';
+        if (on && m_cpu->dsp()) m_cpu->dsp()->startThread();
+    }
     postLog("[Runner] manual mode (ENGINE-BLOCK) - CPU reset released, render() drives the machine\n");
     return true;
 }
@@ -499,7 +504,8 @@ uint32_t Ms2kRunner::render(float* left, float* right, uint32_t frames, const Mi
             // PERF-VST diagnostic (R2, default OFF): MS2K_RENDERSTAT=1 prints calls that ran more than 2 ticks
             static const bool rstat = [] { const char* e = std::getenv("MS2K_RENDERSTAT"); return e && *e == '1'; }();
             const uint32_t fill0 = rstat ? d->audioFill() : 0; const uint64_t cyc0 = rstat ? m_cpu->getCycles() : 0; int ticks = 0;
-            while (d->audioFill() < need && m_running) {
+            auto fill = [d] { if (d->threaded()) d->drain(); return d->audioFill(); };   // DSP-THREAD: caught up first
+            while (fill() < need && m_running) {
                 if (m_cpu->getCycles() >= limit) break;
                 runSteps(kRenderSlice); ++ticks;
             }

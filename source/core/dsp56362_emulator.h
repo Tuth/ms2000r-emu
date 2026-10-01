@@ -30,6 +30,10 @@
 //     KOD-A30412. Modelled through the library's EsaiClock at 48 kHz per core-cycle count.
 //   * PORT_RESET (the DSP's RESET) is not yet driven by the MCU port that owns it.
 #include <atomic>
+#include <immintrin.h>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
@@ -75,10 +79,11 @@ public:
     void tickMcu(uint32_t mcuCycles, uint32_t mcuHz) {
         m_pendHz = mcuHz;
         static const bool lazyOff = [] { const char* e = std::getenv("MS2K_DSPLAZY"); return e && e[0] == 'o' && e[1] == 'f'; }();   // A/B
-        if (!m_batchOk || lazyOff) { runForMcuCycles(mcuCycles, mcuHz); return; }
-        if (m_fsAccum + (uint64_t(m_pendMcu) + mcuCycles) * 48000u >= mcuHz) {
-            syncMcu();
-            runForMcuCycles(mcuCycles, mcuHz);
+        if (!m_batchOk.load(std::memory_order_relaxed) || lazyOff) { post(mcuCycles, mcuHz); return; }
+        if (fsPhase() + (uint64_t(m_pendMcu) + mcuCycles) * 48000u >= mcuHz) {
+            ++m_fsRuns;
+            flushPend();
+            post(mcuCycles, mcuHz);
         } else {
             m_pendMcu += mcuCycles;
         }
@@ -86,14 +91,48 @@ public:
     // PERF-134: for the MCU's peripheral batching - how many more MCU cycles until the chunk that
     // carries the next fs (IRQB) edge (the chunk c is that chunk iff c >= this), and whether chunks
     // may be merged at all yet.
-    bool     mcuBatchOk() const { return m_batchOk; }
+    bool     mcuBatchOk() const { return m_batchOk.load(std::memory_order_relaxed); }
     uint32_t mcuCyclesToNextFs() const {
-        const uint64_t have = m_fsAccum + uint64_t(m_pendMcu) * 48000u;
+        const uint64_t have = fsPhase() + uint64_t(m_pendMcu) * 48000u;
         return have >= m_pendHz ? 0u : uint32_t((m_pendHz - have + 47999u) / 48000u);
     }
+    // syncMcu(): the MCU is about to SEE the DSP (SPI byte, SS, HREQ, PORT_RESET, a MIDI OUT stamp): every MCU
+    // cycle so far is given to the DSP and - with the DSP thread - waited for.
     void syncMcu() {
-        if (m_pendMcu) { const uint32_t p = m_pendMcu; m_pendMcu = 0; runForMcuCycles(p, m_pendHz); }
+        ++m_syncCalls;
+        flushPend();
+        if (m_thr.joinable()) drain();
     }
+    // DSP-THREAD (2026-10-01): the DSP on its own thread. The MCU posts the same (cycles, Hz) chunks it ran
+    // before, in the same order, and waits only where it looks at the DSP (syncMcu); runForMcuCycles() runs on
+    // the DSP thread and nothing else touches the DSP while it does. The fs phase the MCU batches by is kept on
+    // the MCU side (fsPhase: the same arithmetic as runForMcuCycles' m_fsAccum, over the chunks posted).
+    void startThread();
+    void stopThread();
+    bool threaded() const { return m_thr.joinable(); }
+    void drain() {
+        const uint32_t h = m_qHead.load(std::memory_order_relaxed);
+        while (m_qDone.load(std::memory_order_acquire) != h) _mm_pause();
+    }
+    uint64_t m_syncCalls = 0, m_syncRuns = 0, m_fsRuns = 0;
+    void flushPend() { if (m_pendMcu) { ++m_syncRuns; const uint32_t p = m_pendMcu; m_pendMcu = 0; post(p, m_pendHz); } }
+    void post(uint32_t mcuCycles, uint32_t mcuHz) {
+        if (!m_thr.joinable()) { runForMcuCycles(mcuCycles, mcuHz); return; }
+        if (mcuHz) m_fsShadow = (m_fsShadow + uint64_t(mcuCycles) * 48000u) % mcuHz;
+        const uint32_t h = m_qHead.load(std::memory_order_relaxed);
+        while (h - m_qDone.load(std::memory_order_acquire) >= kQ) _mm_pause();
+        m_q[h & (kQ - 1)] = { mcuCycles, mcuHz };
+        m_qHead.store(h + 1, std::memory_order_release);
+        if (m_thrSleeping.load(std::memory_order_acquire)) { std::lock_guard<std::mutex> l(m_thrMx); m_thrCv.notify_one(); }
+    }
+    uint64_t fsPhase() const { return m_thr.joinable() ? m_fsShadow : m_fsAccum; }
+    struct DspReq { uint32_t cycles, hz; };
+    static constexpr uint32_t kQ = 1u << 14;
+    DspReq m_q[kQ] = {};
+    std::atomic<uint32_t> m_qHead{ 0 }, m_qDone{ 0 };
+    std::thread m_thr; std::atomic<bool> m_thrStop{ false }, m_thrSleeping{ false };
+    std::mutex m_thrMx; std::condition_variable m_thrCv;
+    uint64_t m_fsShadow = 0;   // DSP-THREAD study: how often the MCU must wait for the DSP
 
     // DSP-RESET (2026-09-27): PORT_RESET = MCU P35 (KOD-A30411, R137 4.7k to GND) -> DSP RESET pin 44
     // (KOD-A30412). Low holds the DSP in reset (no execution, IRQB = FS2 AND PORT_RESET gated off);
@@ -217,7 +256,7 @@ private:
     uint64_t m_cycleTarget = 0;       // BUG106: DSP cycle count the core must reach
     bool     m_resetHeld = true;       // DSP-RESET: PORT_RESET low at power-on (P35 an input, R137 pull-down)
     uint64_t m_resetReleases = 0;
-    bool     m_batchOk = false;       // PERF-131: PLL on (PCTL PEN) - chunks may be batched
+    std::atomic<bool> m_batchOk{ false };   // PERF-131: PLL on (PCTL PEN) - chunks may be batched (set on the DSP thread)
     uint32_t m_pendMcu = 0;           // PERF-131: MCU cycles not yet given to the DSP
     uint32_t m_pendHz  = 10000000;    // PERF-131: the MCU clock of the last tickMcu()
     uint64_t m_fsAccum = 0;           // BUG106: fs (48 kHz) phase against MCU cycles
