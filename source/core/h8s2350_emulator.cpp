@@ -37,6 +37,11 @@ extern "C" void ms2k_phase(const char* p) { g_ms2kPhase = p; }
 #include <set>       // 2026-09-13: first-touch set for unmapped I/O reporting
 #include <chrono>     // For system_clock (RTC)
 
+extern bool g_h8s_quiet_boot;   // h8s2350_instructions.cpp (global namespace) - PERF-MCU-3
+uint64_t g_ms2kTickNowCalls = 0;   // PERF-MCU: tickPeripheralsNow() calls, MS2K_OPHIST report
+uint64_t g_ms2kTickWhy[3] = {}, g_ms2kBudgetLog2[32] = {}, g_ms2kBudgetWhoN[32] = {};
+int g_ms2kBudgetWho = 0;
+static const bool g_ms2kOpHist = [] { const char* e = std::getenv("MS2K_OPHIST"); return e && *e; }();
 // BUG71: forward declaration - reset() uses this above its definition.
 // It lives in namespace MS2000, like ms2kTpu2Mode() beside it.
 namespace MS2000 { bool ms2kIrqHack(); }
@@ -257,6 +262,20 @@ void H8S2350Emulator::setupGPIOLcdAdapter(std::function<void(uint8_t)> onCmd, st
 
 H8S2350Emulator::~H8S2350Emulator()
 {
+    if (const char* oh = std::getenv("MS2K_OPHIST"); oh && *oh && m_opcode_hit_count.size() == 256) {   // PERF-MCU
+        std::vector<std::pair<uint64_t,int>> v; uint64_t tot = 0;
+        for (int i = 0; i < 256; ++i) { tot += m_opcode_hit_count[i]; if (m_opcode_hit_count[i]) v.push_back({m_opcode_hit_count[i], i}); }
+        std::sort(v.rbegin(), v.rend());
+        for (size_t i = 0; i < v.size() && i < 40; ++i) printf("[OPHIST] %02X %6.2f %%\n", v[i].second, 100.0 * double(v[i].first) / double(tot ? tot : 1));
+        printf("[OPHIST] %llu instructions, tickPeripheralsNow %llu calls (%.2f per 100 instructions)\n", (unsigned long long)tot,
+               (unsigned long long)g_ms2kTickNowCalls, tot ? 100.0 * double(g_ms2kTickNowCalls) / double(tot) : 0.0);
+        printf("[OPHIST] batch ends: budget %llu, irq pending %llu, other event %llu; new budget log2:", (unsigned long long)g_ms2kTickWhy[0],
+               (unsigned long long)g_ms2kTickWhy[1], (unsigned long long)g_ms2kTickWhy[2]);
+        for (int b = 0; b < 32; ++b) if (g_ms2kBudgetLog2[b]) printf(" %d:%llu", b, (unsigned long long)g_ms2kBudgetLog2[b]);
+        printf("\n[OPHIST] budget set by (1 sci1rx 2 sci1tx 3 sci0tx 4 adc 5 dmac-pace 6 dsp-fs 7 tpu 11 rxline 13 sci0-load 16 dsp-nobatch):");
+        for (int b = 0; b < 32; ++b) if (g_ms2kBudgetWhoN[b]) printf(" %d:%llu", b, (unsigned long long)g_ms2kBudgetWhoN[b]);
+        printf("\n");
+    }
     if (const char* ca = std::getenv("MS2K_CYCAUDIT"); ca && *ca) {   // CYC-AUDIT report
         uint64_t n = 0, d = 0, t = 0;
         for (auto& a : m_cycAudit) { n += a.n; d += a.direct; t += a.ticked; }
@@ -1105,7 +1124,7 @@ void H8S2350Emulator::step()
 
     // Execute one instruction
     g_ms2kPhase = "executeInstruction";
-    executeInstruction();
+    executeInstructionFast();   // PERF-MCU-2: falls back to executeInstruction() itself
     g_ms2kPhase = "after-executeInstruction";
     m_cycles_executed++;
     
@@ -1399,7 +1418,7 @@ void H8S2350Emulator::step()
     }
 
     // i16.txt: Try to service interrupts at end of each step
-    irqTryService();
+    if (m_irq_pending.any()) irqTryService();   // PERF-MCU-2: the early-out without the call
 }
 
 void H8S2350Emulator::execute(uint32_t cycles)
@@ -1739,6 +1758,10 @@ uint32_t H8S2350Emulator::busInsnStates(uint32_t pc, uint32_t size, uint8_t op0,
 
 uint8_t H8S2350Emulator::readByte(uint32_t address)
 {
+    if (m_insnRawOn) {   // PERF-MCU-1: the executing instruction's own bytes, as decoded
+        const uint32_t d = address - m_busPc0;
+        if (d < m_busInsnSize) return m_insnRaw[d];
+    }
     if (g_ms2kBusData && m_busInExec && !m_busDepth) busRecord(address, false, false);
 #ifdef MS2K_DIAG_ADDR24   // PERF-124: a call on every bus access cost ~4 % of real time; build-time only now
     addr24Report(address, m_effectivePC, false);
@@ -2174,7 +2197,7 @@ void H8S2350Emulator::writeByte(uint32_t address, uint8_t value)
                 // array (AM29LV800B rendered p.11: the command register occupies no address).
                 // A BYTE store is a byte-lane bus cycle; word stores are intercepted in
                 // writeWord() so that one MOV.W is one cycle, as on the x16 bus.
-                if (m_flash_harness_depth > 0) { ++m_dcacheGen; m_flash_rom[offset] = value; return; }   // PERF-133
+                if (m_flash_harness_depth > 0) { ++m_dcacheGen; m_insnRawOn = false; m_flash_rom[offset] = value; return; }   // PERF-133
                 flashBusCycle(offset, value, 1);
                 return;
             }
@@ -2262,6 +2285,7 @@ void H8S2350Emulator::writeByte(uint32_t address, uint8_t value)
 void H8S2350Emulator::flashBusCycle(uint32_t address, uint16_t data, int width)
 {
     ++m_dcacheGen;   // PERF-133: any flash bus write may change what a fetch reads (array or mode)
+    m_insnRawOn = false;   // PERF-MCU-1
     address &= 0x000FFFFFu;
     uint16_t bus = data;
     if (width == 1) {
@@ -4302,6 +4326,23 @@ void H8S2350Emulator::tpgStep(uint32_t cycles)
     m_tpg.cntr = uint32_t(c1);
     // Tick count for a power-of-two divisor given as its shift (-1 = not driven here).
     #define MS2K_TPG_TICKS(sh) ((sh) < 0 ? 0u : uint32_t((c1 >> (sh)) - (c0 >> (sh))))
+    // PERF-MCU-5 (2026-10-01): the loops below advance a counter one timer clock at a time and
+    // only DO something when it lands on 0 / 0xFFFF / TGRA / TGRB. Up to the clock before the
+    // first such landing every iteration is a bare ++/--, so that run is added in one go and the
+    // loop body runs only at (and after) the landings - the same sequence of states, exactly.
+    auto tpgDist = [](uint32_t d) -> uint32_t { d &= 0xFFFFu; return d ? d : 0x10000u; };
+    auto skipUp = [&](uint16_t& tcnt, uint32_t& n, uint16_t a, uint16_t b) {
+        uint32_t d = tpgDist(0x10000u - tcnt), da = tpgDist(uint32_t(a) - tcnt), db = tpgDist(uint32_t(b) - tcnt);
+        if (da < d) d = da; if (db < d) d = db;
+        const uint32_t k = (n < d) ? n : d - 1u;          // bare increments that land on nothing
+        tcnt = uint16_t(tcnt + k); n -= k;
+    };
+    auto skipDown = [&](uint16_t& tcnt, uint32_t& n, uint16_t a, uint16_t b) {
+        uint32_t d = tpgDist(uint32_t(tcnt) + 1u), da = tpgDist(uint32_t(tcnt) - a), db = tpgDist(uint32_t(tcnt) - b);
+        if (da < d) d = da; if (db < d) d = db;
+        const uint32_t k = (n < d) ? n : d - 1u;
+        tcnt = uint16_t(tcnt - k); n -= k;
+    };
     {
 
         // BUG115 - channel 1 (TSTR bit 1 = CST1). HM Rev 3.00 section 10, RENDERED pages
@@ -4314,7 +4355,8 @@ void H8S2350Emulator::tpgStep(uint32_t cycles)
         // every one of its writes was discarded and TCNT1 read as the unmapped default.
         if (m_tpg.tstr & 0x02) {
             static const int sh1[8] = { 0, 2, 4, 6, -1, -1, 8, -1 };   // phi/1,4,16,64, -, -, 256, -; -1 = external / cascade
-            for (uint32_t n = MS2K_TPG_TICKS(sh1[m_tpg.tcr1 & 0x07]); n--; ) {   // PERF-129 (was PERF-124's per-cycle & test)
+            for (uint32_t n = MS2K_TPG_TICKS(sh1[m_tpg.tcr1 & 0x07]); n && (skipUp(m_tpg.tcnt1, n, m_tpg.tgr1a, m_tpg.tgr1b), n); ) {   // PERF-129, PERF-MCU-5
+                --n;
                 if (++m_tpg.tcnt1 == 0) { m_tpg.tsr1 |= 0x10; if (m_tpg.tier1 & TCIEV) irqRaise(42); }
                 bool clr = false;
                 if (m_tpg.tcnt1 == m_tpg.tgr1a) { m_tpg.tsr1 |= 0x01; if (m_tpg.tier1 & TGIEA) irqRaise(40);
@@ -4328,7 +4370,9 @@ void H8S2350Emulator::tpgStep(uint32_t cycles)
         // channel 2 (TSTR bit2)
         if (m_tpg.tstr & 0x04) {
             static const int sh2[8] = { 0, 2, 4, 6, -1, -1, -1, 10 };  // = tpgDivCH2() as shifts
-            for (uint32_t n = MS2K_TPG_TICKS(sh2[m_tpg.tcr2 & 0x07]); n--; ) {
+            for (uint32_t n = MS2K_TPG_TICKS(sh2[m_tpg.tcr2 & 0x07]); n && ((m_tpg.tsr2 & TCFD) ? skipUp(m_tpg.tcnt2, n, m_tpg.tgr2a, m_tpg.tgr2b)
+                                                                                  : skipDown(m_tpg.tcnt2, n, m_tpg.tgr2a, m_tpg.tgr2b), n); ) {   // PERF-MCU-5
+                --n;
                 if (m_tpg.tsr2 & TCFD) {
                     if (++m_tpg.tcnt2 == 0) { m_tpg.tsr2 |= 0x10; /* TCFV per manual */
                                               if (m_tpg.tier2 & TCIEV) irqRaise(V2V); }
@@ -4350,7 +4394,9 @@ void H8S2350Emulator::tpgStep(uint32_t cycles)
         // channel 4 (TSTR bit4)
         if (m_tpg.tstr & 0x10) {
             static const int sh4[8] = { 0, 2, 4, 6, -1, -1, 10, -1 };  // = tpgDivCH4() as shifts
-            for (uint32_t n = MS2K_TPG_TICKS(sh4[m_tpg.tcr4 & 0x07]); n--; ) {
+            for (uint32_t n = MS2K_TPG_TICKS(sh4[m_tpg.tcr4 & 0x07]); n && ((m_tpg.tsr4 & TCFD) ? skipUp(m_tpg.tcnt4, n, m_tpg.tgr4a, m_tpg.tgr4b)
+                                                                                  : skipDown(m_tpg.tcnt4, n, m_tpg.tgr4a, m_tpg.tgr4b), n); ) {   // PERF-MCU-5
+                --n;
                 if (m_tpg.tsr4 & TCFD) {
                     if (++m_tpg.tcnt4 == 0) { m_tpg.tsr4 |= 0x10;
                                               if (m_tpg.tier4 & TCIEV) irqRaise(V4V); }
@@ -5534,6 +5580,11 @@ static const bool g_ms2kPeriphBatch = [] {
 void H8S2350Emulator::tickPeripherals(uint32_t cycles)
 {
     if (!g_ms2kPeriphBatch || m_peripheral) { tickPeripheralsNow(cycles); return; }
+    if (g_ms2kOpHist) {   // PERF-MCU diag (MS2K_OPHIST): why the batch ends
+        if (!(cycles < m_perBudget)) ++g_ms2kTickWhy[0];
+        else if (m_irq_pending.any()) ++g_ms2kTickWhy[1];
+        else if (peripheralEventNow()) ++g_ms2kTickWhy[2];
+    }
     if (cycles < m_perBudget && !peripheralEventNow()) {
         m_perPend += cycles;
         m_perBudget -= cycles;
@@ -5546,6 +5597,7 @@ void H8S2350Emulator::tickPeripherals(uint32_t cycles)
     peripheralsSync();
     tickPeripheralsNow(cycles);
     m_perBudget = peripheralBudget();
+    if (g_ms2kOpHist) { unsigned b = 0; for (uint64_t v = m_perBudget; v > 1 && b < 31; v >>= 1) ++b; ++g_ms2kBudgetLog2[b]; ++g_ms2kBudgetWhoN[g_ms2kBudgetWho & 31]; }
     m_perDmacFast = m_io_registers.DMAC_FF00_FF07[7] == 0;
 }
 
@@ -5572,17 +5624,18 @@ bool H8S2350Emulator::peripheralEventNow() const
 uint64_t H8S2350Emulator::peripheralBudget() const
 {
     uint64_t b = UINT64_MAX;
-    auto lower = [&b](uint64_t v) { if (v < b) b = v; };
+    auto lower = [&b](uint64_t v, int id = 9) { if (v < b) { b = v; g_ms2kBudgetWho = id; } };
+    g_ms2kBudgetWho = 0;
     // SCI1 RX: a byte on the line starts at once; one in progress ends after m_sci1RxBusy
-    if (m_sci1RxActive) lower(m_sci1RxBusy); else if (!m_sci1RxLine.empty()) return 0;
-    if (m_sci1_tx_active) lower(m_sci1_tx_busy_cycles);
-    if (m_sci0_tx_active) lower(m_sci0_tx_busy_cycles);
-    else if ((m_sci[0].SCR & 0x20) && !(m_sci[0].SSR & 0x80)) return 0;       // sci0TryLoadTsr() would load
-    if (ms2kAdc() && m_adc_converting) lower(m_adc_busy_cycles);
+    if (m_sci1RxActive) lower(m_sci1RxBusy, 1); else if (!m_sci1RxLine.empty()) { g_ms2kBudgetWho = 11; return 0; }
+    if (m_sci1_tx_active) lower(m_sci1_tx_busy_cycles, 2);
+    if (m_sci0_tx_active) lower(m_sci0_tx_busy_cycles, 3);
+    else if ((m_sci[0].SCR & 0x20) && !(m_sci[0].SSR & 0x80)) { g_ms2kBudgetWho = 13; return 0; }       // sci0TryLoadTsr() would load
+    if (ms2kAdc() && m_adc_converting) lower(m_adc_busy_cycles, 4);
     // dmacStep's pace. With no DTE set a crossing only resets the phase, which the batching path
     // keeps chunk by chunk (PERF-136); with a DTE set the crossing chunk services the DMAC.
-    if (m_io_registers.DMAC_FF00_FF07[7] != 0) lower(64u - (m_dmac_pace_accum < 64u ? m_dmac_pace_accum : 64u));
-    if (m_dsp) { if (!m_dsp->mcuBatchOk()) return 0; lower(m_dsp->mcuCyclesToNextFs()); }
+    if (m_io_registers.DMAC_FF00_FF07[7] != 0) lower(64u - (m_dmac_pace_accum < 64u ? m_dmac_pace_accum : 64u), 5);
+    if (m_dsp) { if (!m_dsp->mcuBatchOk()) { g_ms2kBudgetWho = 16; return 0; } lower(m_dsp->mcuCyclesToNextFs(), 6); }
     // TPU: the prescaler tick that makes TCNT hit TGRA/TGRB, overflow or underflow first.
     auto tpu = [&](unsigned sh, uint16_t tcnt, uint16_t tgra, uint16_t tgrb, bool up) {
         auto dist = [](uint32_t d) -> uint32_t { d &= 0xFFFFu; return d ? d : 0x10000u; };
@@ -5592,7 +5645,7 @@ uint64_t H8S2350Emulator::peripheralBudget() const
         else    k = min3(uint32_t(tcnt) + 1u, dist(uint32_t(tcnt) - tgra), dist(uint32_t(tcnt) - tgrb));
         const uint64_t div = uint64_t(1) << sh;
         const uint64_t first = div - (uint64_t(m_tpg.cntr) & (div - 1));   // cycles to the next tick
-        lower(first + uint64_t(k - 1) * div);
+        lower(first + uint64_t(k - 1) * div, 7);
     };
     static const int sh1[8] = { 0, 2, 4, 6, -1, -1, 8, -1 };
     static const int sh2[8] = { 0, 2, 4, 6, -1, -1, -1, 10 };
@@ -5651,6 +5704,7 @@ void H8S2350Emulator::panelTestIoStep()
 
 void H8S2350Emulator::tickPeripheralsNow(uint32_t cycles)
 {
+    ++g_ms2kTickNowCalls;
     m_inTick = true;   // PERF-134: I/O accesses from inside (DMAC, DTC) must not re-enter the sync
     m_tickedCycles += cycles;   // BUG126 measurement: the clock the peripherals (TPU, SCI, DSP) actually see
     // MS2K_PANELKEYS="t:col.row:dur;..." (2026-09-25, a TEST INPUT like MS2K_MIDIIN - the
@@ -6029,6 +6083,8 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
         (flash && m_flash_rom.mode() != FlashROM::Mode::READ_ARRAY)) {
         m_decodeScratch = m_decoder.decode(*this, pc);
         m_decodeOp0 = readByte(pc);
+        m_decodeRaw = nullptr;                    // PERF-MCU-1: no byte window on this path
+        m_decodeFk = 0;
         return m_decodeScratch;
     }
     if (m_dcache.empty()) {
@@ -6039,9 +6095,12 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
     DecodeCacheEntry& e = m_dcache[(pc >> 1) & (DCACHE_SIZE - 1)];
     const uint32_t pg = dram ? ((pc - 0x400000u) >> 8) : 0;
     const uint32_t pgen = dram ? m_dramPageGen[pg] : 0;
-    if (e.pc == pc && e.gen == m_dcacheGen && e.pageGen == pgen) { m_decodeOp0 = e.op0; return e.insn; }
+    if (e.pc == pc && e.gen == m_dcacheGen && e.pageGen == pgen) { m_decodeOp0 = e.op0; m_decodeRaw = e.raw; m_decodeFk = e.fk; return e.insn; }
     e.insn = m_decoder.decode(*this, pc);
     e.op0 = m_decodeOp0 = readByte(pc);
+    for (uint32_t k = 0; k < 10u; ++k) e.raw[k] = k < e.insn.size ? readByte(pc + k) : uint8_t(0);   // PERF-MCU-1
+    m_decodeRaw = e.raw;
+    e.fk = m_decodeFk = fusedKind(e.insn, e.raw);   // PERF-MCU-3
     e.pc = pc; e.gen = m_dcacheGen; e.pageGen = pgen;
     if (dram) {                                   // this page and the one the tail may reach
         m_dramCodePage[pg] = 1;
@@ -6049,6 +6108,163 @@ const H8S2350Instruction& H8S2350Emulator::decodeCached(uint32_t pc)
         if (pg2 < DRAM_PAGES) m_dramCodePage[pg2] = 1;
     }
     return e.insn;
+}
+
+// ===================================================================
+// PERF-MCU-2 (2026-10-01): the lean instruction path. executeInstruction() below grew a dozen
+// diagnostic stations over the bring-up (ring logs, watches, traces, audits, first-fault, the
+// PC sanity checks) - all default OFF, but their tests, spills and a 400-byte frame were paid on
+// every instruction (the profile smeared ~0.5 % over a hundred instructions of it). This is the
+// SAME sequence of state changes with the stations that cannot fire left out:
+//   - only for a PC inside flash 0x400-0xEFFFF or the DRAM, even - everything the full path would
+//     report or halt on (vector table, off-map, I/O window, odd PC) goes to the full path;
+//   - only with every diagnostic off (any env switch, trace, verbose boot -> the full path);
+//   - an invalid decoded size -> the full path, before this one has changed anything.
+// MS2K_SLOWEXEC=1 forces the full path everywhere (A/B: the output must be bit-identical).
+// ===================================================================
+// PERF-MCU-3 (2026-10-01): FUSED forms. The bytes-per-instruction histogram of a real run
+// (MS2K_OPHIST, 20 s headless, with the DSP) is dominated by three shapes: 00 00 NOP 27.9 %
+// (the firmware's 50-NOP delay pads at 0x0C22/0x1A98/0x6AB6), Bcc d:8 (40-4F) ~14 %, Bcc d:16
+// (58) 5.3 %. Through the executor each paid the wrapper, the dispatch chain and a re-read of
+// its own bytes. Here they are executed in place - the SAME effects their executor bodies have
+// (executeNop: none; executeBcc8/16: the condition table, then PC = target) plus the wrapper's
+// updateLastExec - and only for exactly the decodes the dispatch would send to those bodies
+// (decoded primary == first byte, sizes 2/2/4, no DAA/ADDX mnemonic). Cycles are the decoded
+// baseCycles either way (the executor's own addCycles are discarded by the caller).
+enum : uint8_t { FK_NONE = 0, FK_NOP = 1, FK_BCC8 = 2, FK_BCC16 = 3 };
+uint8_t H8S2350Emulator::fusedKind(const H8S2350Instruction& insn, const uint8_t* raw)
+{
+    const std::string& m = insn.mnemonic;
+    if (m == "DAA.B" || m == "DAS.B" || m == "ADDX_RR" || m == "ADDX_IMM8") return FK_NONE;
+    if (insn.size == 2 && raw[0] == 0x00 && raw[1] == 0x00 && insn.opcode == 0x00) return FK_NOP;
+    if (insn.size == 2 && raw[0] >= 0x40 && raw[0] <= 0x4F && insn.opcode == raw[0]) return FK_BCC8;
+    if (insn.size == 4 && raw[0] == 0x58 && insn.opcode == 0x58) return FK_BCC16;
+    return FK_NONE;
+}
+static inline bool ms2kCcTake(const H8SFlags& f, unsigned cc)
+{
+    const bool C = f.carry, Z = f.zero, N = f.negative, V = f.overflow;
+    switch (cc & 0xFu) {
+        case 0x0: return true;            case 0x1: return false;
+        case 0x2: return !C && !Z;        case 0x3: return C || Z;
+        case 0x4: return !C;              case 0x5: return C;
+        case 0x6: return !Z;              case 0x7: return Z;
+        case 0x8: return !V;              case 0x9: return V;
+        case 0xA: return !N;              case 0xB: return N;
+        case 0xC: return N == V;          case 0xD: return N != V;
+        case 0xE: return !Z && (N == V);  default:  return Z || (N != V);
+    }
+}
+static const bool g_ms2kFusedOff = [] { const char* e = std::getenv("MS2K_FUSED"); return e && (std::strcmp(e, "off") == 0 || *e == '0'); }();
+
+static const bool g_ms2kFastExecEnv = [] {
+    const char* e = std::getenv("MS2K_SLOWEXEC");
+    const bool slow = e && *e && *e != '0';
+    return !slow && !g_ms2kInsnDiag && !g_ms2kPcRing && !g_ms2kFirstFault && !g_ms2kBootPhase
+        && !g_ms2kCycAudit && !g_ms2kCycLegacy && g_ms2kBusData != 1 && !ms2kPanelRelease();
+}();
+
+void H8S2350Emulator::executeInstructionFast()
+{
+    const uint32_t pc0 = m_registers.pc;
+    if (!g_ms2kFastExecEnv || m_trace || m_trace_cpu_always || !m_quietBoot || (pc0 & 1u)
+        || !((pc0 >= 0x400u && pc0 < 0xF0000u) || (pc0 >= 0x400000u && pc0 < 0x480000u))) {
+        executeInstruction();
+        return;
+    }
+    const H8S2350Instruction& insn = decodeCached(pc0);
+    const uint32_t size = insn.size;
+    if (size != 2 && size != 4 && size != 6 && size != 8 && size != 10) { executeInstruction(); return; }
+    const uint8_t op0 = m_decodeOp0;
+    {   // SP WATCH (see executeInstruction) - a fault report, kept
+        const uint32_t sp24 = m_registers.er[7] & 0x00FFFFFFu;
+        if (sp24 > 0x00FFFC00u && sp24 < 0x00FFFE40u && !m_spUnderflowReported) {
+            m_spUnderflowReported = true;
+            printf("[SP-UNDERFLOW] SP=0x%06X is %u bytes ABOVE the firmware's own stack base "
+                   "0xFFFC00, at PC=0x%06X. The stack has been popped more than it was pushed.\n",
+                   sp24, unsigned(sp24 - 0x00FFFC00u), pc0);
+            pcRingDump("SP-UNDERFLOW");
+        }
+    }
+    ++g_ms2kInsnIndex;
+    const int history_idx = m_pc_history_idx;
+    {
+    m_dbg_last.prev    = m_dbg_last.start;
+    m_dbg_last.start   = insn.decoded_pc;
+    m_dbg_last.size    = insn.size;
+    m_dbg_last.primary = insn.opcode;
+    m_real_instruction_count++;
+    m_total_instruction_count++;
+    m_sp_modified_this_cycle = false;
+    m_r7_modified_this_cycle = false;
+    {
+        PcHistoryEntry& h = m_pc_history[history_idx];
+        h.pc = pc0; h.opcode = 0; h.size = 0;
+        m_pc_history_idx = (m_pc_history_idx + 1 == 10) ? 0 : m_pc_history_idx + 1;
+    }
+    m_dbg_last.prev = m_dbg_last.start;
+    m_opcode_hit_count[op0]++;
+    }
+    m_registers.pc = (pc0 + size) & 0x00FFFFFF;
+    const uint64_t cyc0 = m_cycles;
+    m_busInExec = g_ms2kBusData != 0; m_busRecN = 0; m_busPc0 = pc0 & 0xFFFFFFu; m_busInsnSize = size;
+    m_insnRaw = m_decodeRaw;
+    m_insnRawOn = m_decodeRaw != nullptr && !g_fifoWatchOn && !g_pcmReadOn;
+    uint32_t execCycles;
+    if (m_decodeFk && ::g_h8s_quiet_boot && !g_ms2kFusedOff) {          // PERF-MCU-3
+        const uint8_t* raw = m_decodeRaw;
+        switch (m_decodeFk) {
+            case FK_BCC8:
+                if (ms2kCcTake(m_flags, insn.source_operand & 0x0Fu))
+                    m_registers.pc = (pc0 + 2u + uint32_t(int32_t(int8_t(raw[1])))) & 0x00FFFFFFu;
+                break;
+            case FK_BCC16:
+                if (ms2kCcTake(m_flags, raw[1] >> 4))
+                    m_registers.pc = (pc0 + 4u + uint32_t(int32_t(int16_t(uint16_t(raw[2]) << 8 | raw[3])))) & 0x00FFFFFFu;
+                break;
+            default: break;                                            // FK_NOP
+        }
+        m_last_exec.start = pcMask24(insn.decoded_pc); m_last_exec.size = insn.size;     // = updateLastExec()
+        m_last_exec.pc = m_registers.pc; m_last_exec.primary = insn.opcode;
+        execCycles = insn.baseCycles;
+    } else {
+        execCycles = m_executor.execute(*this, insn, pc0).cycles;
+    }
+    m_busInExec = false;
+    m_insnRawOn = false;
+    {
+    m_pc_history[history_idx].opcode = insn.opcode & 0xFFFF;
+    m_pc_history[history_idx].size = insn.size;
+    }
+    const bool shiftGroup = insn.opcode >= 0x10 && insn.opcode <= 0x13;
+    if (shiftGroup) m_registers.pc = (pc0 + size) & 0x00FFFFFF;
+    m_last_store.valid = false;
+    if (m_first_fault_detected) return;
+    uint32_t cycles = execCycles ? execCycles : insn.baseCycles;
+    if (shiftGroup) cycles = uint32_t(m_cycles - cyc0);
+    if (g_ms2kBusData) {                                 // == 2 here (1 takes the full path)
+        const uint32_t pcA = (pc0 >> 21) & 7u;
+        if (m_busRecN == 0 && m_busLastExt && m_busLastRead && !m_busLastDram
+            && m_busLastArea == pcA && !m_busArea[pcA].dram) {
+            uint32_t I = size / 2;
+            if (I < 2 && ((op0 >= 0x40 && op0 <= 0x4F) || op0 == 0x54 || op0 == 0x55 || op0 == 0x56 || op0 == 0x57
+                          || op0 == 0x59 || op0 == 0x5B || op0 == 0x5D || op0 == 0x5F)) I = 2;
+            uint32_t add = I * (m_busArea[pcA].sWord - 1u);
+            if (!(m_io_registers.MCR & 0x20u)) m_busDramOpen = false;
+            if (m_busRefreshAvail) {
+                m_busRefreshAcc += cycles + add;
+                while (m_busRefreshAcc >= m_busRefreshAvail) { m_busRefreshAcc -= m_busRefreshAvail; add += m_busRefreshLen; m_busDramOpen = false; }
+            }
+            cycles += add;
+        } else {
+            cycles += busInsnStates(pc0 & 0xFFFFFFu, size, op0, cycles);
+        }
+    } else {
+        cycles += fetchExtraStates(pc0, size, op0);
+    }
+    m_cycles = cyc0;
+    tickPeripherals(cycles);
+    addCycles(cycles);
 }
 
 void H8S2350Emulator::executeInstruction()
@@ -6480,13 +6696,16 @@ loopwatch_done:
     
     m_dbg_last.prev = m_dbg_last.start;
     // The executor doesn't have a success flag, so we track opcode hits directly
-    m_opcode_hit_count[insn.opcode & 0xFF]++;
+    m_opcode_hit_count[op0]++;   // PERF-MCU: by the first instruction byte (MS2K_OPHIST / DIFFREF_HIST)
     
     g_ms2kPhase = "exec";
     const uint64_t cycAudit0 = m_cycles;   // CYC-AUDIT (MS2K_CYCAUDIT=1): states the executor adds itself
     m_busInExec = g_ms2kBusData != 0; m_busRecN = 0; m_busPc0 = pc0 & 0xFFFFFFu; m_busInsnSize = insn.size;
+    m_insnRaw = m_decodeRaw;                                           // PERF-MCU-1
+    m_insnRawOn = m_decodeRaw != nullptr && !g_fifoWatchOn && !g_pcmReadOn && insn.size <= 10u;
     auto execResult = m_executor.execute(*this, insn, pc0);
     m_busInExec = false;
+    m_insnRawOn = false;
     const uint64_t cycAuditDirect = m_cycles - cycAudit0;
     g_ms2kPhase = "post-exec";
     

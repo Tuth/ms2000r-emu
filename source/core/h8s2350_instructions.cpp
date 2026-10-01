@@ -2809,7 +2809,7 @@ namespace MS2000
         // fed a wrong CCR by us, the campaign shape this thread has paid for since the
         // Virus. The whole 0x50-0x53 block is now one encoding-driven case below, and the
         // signed forms live with the 0x01 prefix that actually encodes them.
-        if (instruction.mnemonic == "DAA.B" || instruction.mnemonic == "DAS.B") {
+        if (instruction.mnemonic.size() == 5 && (instruction.mnemonic == "DAA.B" || instruction.mnemonic == "DAS.B")) {   // PERF-MCU-1: length first
             auto& regs = emulator->getRegisters();
             auto& f = emulator->getFlags();
 
@@ -2872,7 +2872,7 @@ namespace MS2000
         }
 
             // Early intercept: ADDX (P1.10)
-        if (instruction.mnemonic == "ADDX_RR" || instruction.mnemonic == "ADDX_IMM8") {
+        if ((instruction.mnemonic.size() == 7 || instruction.mnemonic.size() == 9) && (instruction.mnemonic == "ADDX_RR" || instruction.mnemonic == "ADDX_IMM8")) {   // PERF-MCU-1
             auto& regs = emulator->getRegisters();
             auto& flags = emulator->getFlags();
 

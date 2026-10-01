@@ -175,6 +175,15 @@ set(MS2000_HEADERS
 # MS2000 core library
 add_library(ms2000 STATIC ${MS2000_SOURCES} ${MS2000_HEADERS})
 
+# PERF-MCU-4 (2026-10-01): whole-program optimisation for the core. The executor TU calls the
+# emulator's readByte/writeByte/sync helpers on every instruction; without LTCG none of those
+# cross-TU calls can be inlined. /GS- drops the stack-cookie checks (1.5 % of the MCU profile).
+if(MSVC)
+    target_compile_options(ms2000 PRIVATE $<$<CONFIG:Release>:/GL /GS->)
+    set_property(TARGET ms2000 APPEND PROPERTY STATIC_LIBRARY_OPTIONS $<$<CONFIG:Release>:/LTCG>)
+    target_link_options(ms2000 INTERFACE $<$<CONFIG:Release>:/LTCG>)
+endif()
+
 # MS2000 library properties
 set_target_properties(ms2000 PROPERTIES
     CXX_STANDARD 17

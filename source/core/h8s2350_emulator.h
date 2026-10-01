@@ -1211,7 +1211,17 @@ private:
     // mode changes) and reset() bump m_dcacheGen; a DRAM write into a page holding cached code bumps
     // that page's generation and the previous page's (an instruction is up to 10 bytes long).
     // MS2K_DCACHE=off decodes every instruction afresh (A/B).
-    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu; uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; H8S2350Instruction insn; };
+    struct DecodeCacheEntry { uint32_t pc = 0xFFFFFFFFu; uint32_t gen = 0; uint32_t pageGen = 0; uint8_t op0 = 0; uint8_t fk = 0; uint8_t raw[10] = {}; H8S2350Instruction insn; };
+    // PERF-MCU-1 (2026-10-01): the executors re-read their own instruction bytes through readByte()
+    // (opcode, register fields, immediates, absolute addresses) - the whole bus path per byte. The
+    // cache entry now keeps the bytes it decoded; while the instruction executes, readByte() answers
+    // [pc0, pc0+size) from them. Off for the uncached decode path, the diagnostics that watch reads,
+    // and from the moment a flash bus write or a DRAM write into a code page happens (conservative).
+    const uint8_t* m_decodeRaw = nullptr;             // set by decodeCached(): the entry's bytes, or null
+    uint8_t m_decodeFk = 0;                           // PERF-MCU-3: fused kind of the entry (0 = executor)
+    static uint8_t fusedKind(const H8S2350Instruction& insn, const uint8_t* raw);
+    const uint8_t* m_insnRaw = nullptr;
+    bool m_insnRawOn = false;
     static constexpr uint32_t DCACHE_SIZE = 1u << 16;
     static constexpr uint32_t DRAM_PAGES  = 0x80000u >> 8;
     std::vector<DecodeCacheEntry> m_dcache;
@@ -1227,10 +1237,10 @@ private:
     uint8_t m_decodeOp0 = 0;                          // PERF-135: the byte at pc, read once with the decode
     inline void dramCodeWrite(uint32_t addr) {        // PERF-133: addr in 0x400000-0x47FFFF
         const uint32_t pg = (addr - 0x400000u) >> 8;
-        if (pg < DRAM_PAGES && !m_dramCodePage.empty() && m_dramCodePage[pg]) { ++m_dramPageGen[pg]; if (pg) ++m_dramPageGen[pg - 1]; }
+        if (pg < DRAM_PAGES && !m_dramCodePage.empty() && m_dramCodePage[pg]) { ++m_dramPageGen[pg]; if (pg) ++m_dramPageGen[pg - 1]; m_insnRawOn = false; }
     }
 public:
-    void invalidateDecodeCache() { ++m_dcacheGen; }   // PERF-133: host-side changes to code memory
+    void invalidateDecodeCache() { ++m_dcacheGen; m_insnRawOn = false; }   // PERF-133: host-side changes to code memory
 private:
     H8S2350InstructionExecutor m_executor;
     bool m_trace = false;
@@ -2006,6 +2016,8 @@ private:
 
     // Instruction execution
     void executeInstruction();
+    void executeInstructionFast();   // PERF-MCU-2
+    bool m_spUnderflowReported = false;
     void handleInterrupt(H8S2350Interrupt interrupt);
     void updateFlags();
     
@@ -2171,6 +2183,9 @@ private:
 
     // ===== OPCODE COVERAGE AUDIT =====
     std::vector<uint64_t> m_opcode_hit_count;
+public:
+    const std::vector<uint64_t>& opcodeHits() const { return m_opcode_hit_count; }   // PERF-MCU: DIFFREF_BENCH histogram
+private:
     std::vector<uint64_t> m_opcode_miss_count;
 };
 

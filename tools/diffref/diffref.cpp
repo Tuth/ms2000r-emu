@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 // DIFFREF - instruction-level differential test: our H8S/2350 core vs the UKNTCH2000
 // reference core (local-only; see ref_wrap.c). One instruction per test, random but
@@ -107,6 +108,12 @@ int main(int argc, char** argv)
         printf("[BENCH] reference: %lld steps in %.3f s = %.1f ns/step (%.1f M/s), PC now %06X\n", rdone, rs, rs * 1e9 / double(rdone > 0 ? rdone : 1), double(rdone) / rs / 1e6, rpc);
         printf("[BENCH] ours     : %lld steps in %.3f s = %.1f ns/step (%.1f M/s), PC now %06X, MCU time %.3f s\n", n, os, os * 1e9 / double(n), double(n) / os / 1e6,
                me.getRegisters().pc, double(me.getCycles()) / double(me.getClockFrequency()));
+        if (getenv("DIFFREF_HIST")) {   // PERF-MCU: primary-opcode histogram of the bench run
+            const auto& h = me.opcodeHits(); std::vector<std::pair<uint64_t,int>> v;
+            uint64_t tot = 0; for (int i = 0; i < 256 && i < (int)h.size(); ++i) { tot += h[i]; if (h[i]) v.push_back({h[i], i}); }
+            std::sort(v.rbegin(), v.rend());
+            for (size_t i = 0; i < v.size() && i < 32; ++i) printf("[HIST] %02X %6.2f %%\n", v[i].second, 100.0 * double(v[i].first) / double(tot ? tot : 1));
+        }
         return 0;
     }
     // DIFFREF_ONE="01 00 78 00 6B A3 00 40 14 5A" [DIFFREF_REGS="er0,er1,...,er7" hex] - run ONE
