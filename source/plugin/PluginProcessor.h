@@ -49,6 +49,7 @@ public:
     bool mic2 = false, dac20 = false;
     int editorW = 0, editorTab = 0;                      // the editor's last width and page
     std::atomic<bool> hostClock{ true };                 // MIDI-CLOCK: the host tempo as F8 clocks into MIDI IN
+    std::atomic<bool> dspThread{ false };                // DSP-THREAD: the DSP on a second core (from the next start)
     std::atomic<bool> knobFollow{ false };               // KNOB-FOLLOW: the pots show the program (off = where you left them)
     std::atomic<bool> transportMsgs{ true };             // MIDI-CLOCK b: Start (on a quarter) / Stop with the host transport
     juce::String libraryPath;                            // LIBRARY-1: the .syx the Library page shows

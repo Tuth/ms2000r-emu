@@ -77,6 +77,7 @@ private:
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selected) override;
     void listBoxItemClicked(int row, const juce::MouseEvent&) override;
     // KNOB-FOLLOW: the pots drawn from the edit buffer (or where the physical pots stand)
+    juce::ToggleButton m_dspThr{ "DSP on a second core  (less load on the host's audio thread, more CPU in total; from the next start)" };
     juce::ToggleButton m_follow{ "Knobs show the program  (off: a pot stays where you leave it, as on the unit)" };
     uint16_t m_disp[4][8] = {};
     int m_lastMoved = -1; juce::uint32 m_lastMoveMs = 0;

@@ -12,6 +12,12 @@
 //   mode "reboot" (VST3-2): 1 s in, a state with a different flash is set while the machine runs (a power
 //                 cycle); the note is played 5 s after that; the WAV / RMS show the machine came back.
 #include <JuceHeader.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <iostream>
 #include <algorithm>
 #include <vector>
@@ -244,6 +250,13 @@ int main(int argc, char** argv)
         for (size_t i = skip; i < g_blockMs.size(); ++i) { overLate += g_blockMs[i] > dur; maxLate = std::max(maxLate, g_blockMs[i]); }
         std::cout << " (after the first 3 s: " << overLate << ", max " << maxLate << " ms)";
     }
+#ifdef _WIN32
+    {   // DSP-THREAD b: the whole process' CPU time (all threads) against the audio played
+        FILETIME c0, e0, k0, u0; GetProcessTimes(GetCurrentProcess(), &c0, &e0, &k0, &u0);
+        auto ft = [](FILETIME f) { return double((uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime) * 1e-7; };
+        std::cout << "\nprocess CPU " << (ft(k0) + ft(u0)) << " s (user " << ft(u0) << ", kernel " << ft(k0) << ") for " << secs << " s of audio";
+    }
+#endif
     std::cout << "\nmidi out events " << midiOutEvents << ", " << secs << " s at " << rate << " Hz / " << block << " in " << wall << " s wall\n";
     return rc;
 }

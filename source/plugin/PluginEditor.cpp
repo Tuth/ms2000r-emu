@@ -149,6 +149,10 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
     m_clock.setToggleState(m_proc.hostClock.load(), juce::dontSendNotification);
     m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); };
+    m_dspThr.setToggleState(m_proc.dspThread.load(), juce::dontSendNotification);
+    m_dspThr.onClick = [this] { m_proc.dspThread = m_dspThr.getToggleState(); };
+    m_dspThr.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_dspThr);
     m_follow.setToggleState(m_proc.knobFollow.load(), juce::dontSendNotification);
     m_follow.onClick = [this] { m_proc.knobFollow = m_follow.getToggleState(); refreshKnobs(); m_dirty = true; };
     m_follow.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
@@ -241,7 +245,7 @@ void Ms2kEditor::showTab(int t)
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
     m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
-    m_transport.setVisible(t == 1); m_follow.setVisible(t == 1);
+    m_transport.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
@@ -272,6 +276,7 @@ void Ms2kEditor::resized()
     m_clock.setBounds(r.removeFromTop(30));
     m_transport.setBounds(r.removeFromTop(30));
     m_follow.setBounds(r.removeFromTop(30));
+    m_dspThr.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
     m_demo.setBounds(r.removeFromTop(30).withWidth(300));
     r.removeFromTop(10);
@@ -343,6 +348,7 @@ void Ms2kEditor::testClick(float px, float py, bool shift)
 // ---- the timer: LEDs, LCD, demo keys ----
 void Ms2kEditor::timerCallback()
 {
+    if (!isShowing() && m_testTick < 0 && m_demoPhase == 0) return;   // DSP-THREAD b: nothing to draw while hidden/minimised
     if (m_testTick >= 0) {
         ++m_testTick;
         if (m_testTick == 60) setSize(1400, int(std::lround(1400.0f * VPanel::kH / VPanel::kW)) + kTabH);

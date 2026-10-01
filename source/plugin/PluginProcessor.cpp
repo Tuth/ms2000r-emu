@@ -184,7 +184,7 @@ bool Ms2kProcessor::startMachine()
     cfg.quietBoot = true;
     cfg.useMmcss = false;
     cfg.audio.enabled = false;
-    cfg.dspThread = true;                                   // DSP-THREAD: the DSP in parallel with the MCU
+    cfg.dspThread = dspThread.load();                       // DSP-THREAD: optional (Settings) - more total CPU, less on the host's audio thread
     cfg.flashStateSave = false;                              // the plugin's flash state lives in the project
     cfg.flashStateLoad = !m_haveProjectFlash;                // a fresh instance: the folder's, as the standalone
     if (m_haveProjectFlash && m_projectMask) { cfg.flashStateMask = m_projectMask; cfg.flashStateImage = m_projectImage; }
@@ -386,6 +386,7 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("hostClock", hostClock.load(), nullptr);
     t.setProperty("transportMsgs", transportMsgs.load(), nullptr);
     t.setProperty("knobFollow", knobFollow.load(), nullptr);
+    t.setProperty("dspThread", dspThread.load(), nullptr);
     t.setProperty("libraryPath", libraryPath, nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
@@ -419,6 +420,7 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     hostClock = bool(t.getProperty("hostClock", true));
     transportMsgs = bool(t.getProperty("transportMsgs", true));
     knobFollow = bool(t.getProperty("knobFollow", false));
+    dspThread = bool(t.getProperty("dspThread", false));
     libraryPath = t.getProperty("libraryPath", "").toString();
 
     // the flash this project's machine had

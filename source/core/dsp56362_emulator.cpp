@@ -126,12 +126,15 @@ void DSP56362Emulator::loadAudioInWav(const char* path)
            rate, rate == 48000 ? "" : " - NOT 48 kHz, played as is");
 }
 
+void ms2kAudioWorkerThread();   // thread_prio_win.cpp
+
 void DSP56362Emulator::startThread()
 {
     if (m_thr.joinable() || !m_dsp) return;
     m_fsShadow = m_fsAccum;
     m_thrStop = false;
     m_thr = std::thread([this] {
+        ms2kAudioWorkerThread();   // DSP-THREAD b: MMCSS Pro Audio, no power throttling
         for (;;) {
             const uint32_t d = m_qDone.load(std::memory_order_relaxed);
             if (d != m_qHead.load(std::memory_order_acquire)) {
@@ -143,7 +146,7 @@ void DSP56362Emulator::startThread()
             if (m_thrStop.load(std::memory_order_acquire)) break;
             // idle: spin a little (the next chunk is usually ~20 us of MCU time away), then sleep until posted
             bool got = false;
-            for (int i = 0; i < 4000 && !got; ++i) { _mm_pause(); got = m_qHead.load(std::memory_order_acquire) != d; }
+            for (int i = 0; i < 400 && !got; ++i) { _mm_pause(); got = m_qHead.load(std::memory_order_acquire) != d; }
             if (got) continue;
             std::unique_lock<std::mutex> l(m_thrMx);
             m_thrSleeping.store(true, std::memory_order_release);

@@ -59,6 +59,7 @@ include_directories(
 set(MS2000_SOURCES
     source/core/syx_parser.cpp
     source/core/dsp56362_emulator.cpp
+    source/core/thread_prio_win.cpp
     source/core/h8s2350_emulator.cpp
     source/core/h8s2350_instructions.cpp
     source/core/sampling_profiler.cpp
