@@ -1,0 +1,40 @@
+diff --git a/source/dsp56kEmu/dsp_decode.inl b/source/dsp56kEmu/dsp_decode.inl
+--- a/source/dsp56kEmu/dsp_decode.inl
++++ b/source/dsp56kEmu/dsp_decode.inl
+@@ -659,6 +659,7 @@
+ 		case 2: convert(x, regToBus(x1()));	convert(y, regToBus(x0()));	return;
+ 		case 3: convert(x, regToBus(y1()));	convert(y, regToBus(y0()));	return;
+ 		case 4:
++			sr_s_update();		// MS2000 DSP-VALID: a long move reading A or B updates S (FM Table 5-1), as the JIT does
+ 			if(isSixteenBitArithmetic())
+ 			{
+ 				limitTransferSixteenBitLong(reg.a, x, y);
+@@ -667,6 +668,7 @@
+ 			limitTransferLong(reg.a, x, y);
+ 			return;
+ 		case 5:
++			sr_s_update();		// MS2000 DSP-VALID: see case 4
+ 			if(isSixteenBitArithmetic())
+ 			{
+ 				limitTransferSixteenBitLong(reg.b, x, y);
+diff --git a/source/dsp56kEmu/jitops_decode.cpp b/source/dsp56kEmu/jitops_decode.cpp
+--- a/source/dsp56kEmu/jitops_decode.cpp
++++ b/source/dsp56kEmu/jitops_decode.cpp
+@@ -615,6 +615,17 @@
+ 	}
+ 	void JitOps::decode_LLL_read(TWord _lll, DspValue& x, DspValue& y)
+ 	{
++		// MS2000 DSP-VALID: a long move that reads A or B updates S (FM Table 5-1, RENDERED p.94: S is computed "when
++		// an instruction or a parallel move reads the contents of accumulator A or B to the XDB or YDB bus",
++		// S = (A46 XOR A45) OR (B46 XOR B45) OR S in no scaling, one bit up/down in scale down/up). Measured missing
++		// by joelanders/dsp56300-md-mm's manual oracle (448 long-move cases); same fix as theirs (ff0f77f1):
++		// before the two output temps are allocated, so the x86 pool can still give ccr_s_update its temporaries.
++		if(_lll == 4 || _lll == 5)
++		{
++			ccr_s_update(r64(m_dspRegs.getALU(0)));
++			ccr_s_update(r64(m_dspRegs.getALU(1)));
++		}
++
+ 		x.temp(DspValue::Temp24);
+ 		y.temp(DspValue::Temp24);
+ 
