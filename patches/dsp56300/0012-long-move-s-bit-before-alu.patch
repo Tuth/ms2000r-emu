@@ -1,0 +1,53 @@
+diff --git a/source/dsp56kEmu/jitops.cpp b/source/dsp56kEmu/jitops.cpp
+--- a/source/dsp56kEmu/jitops.cpp
++++ b/source/dsp56kEmu/jitops.cpp
+@@ -396,10 +396,27 @@
+ 		m_block.dspRegPool().setIsParallelOp(true, moveRegs);
+ 
+ 		emitOpProlog();
++
++		// MS2000 DSP-VALID-3: a long move that reads A or B updates S from BOTH accumulators (FM Table 5-1, rendered
++		// p.5-14). The ALU half is emitted first, and an accumulator the move does not name is not latched, so S has to
++		// be taken here, before the ALU writes it - as the interpreter does (it decodes the move before the ALU op).
++		m_sUpdatedByParallelMove = false;
++		if(_instMove == Movel_ea || _instMove == Movel_aa)
++		{
++			const auto lll = _instMove == Movel_ea ? getFieldValue<Movel_ea, Field_L, Field_LL>(_op) : getFieldValue<Movel_aa, Field_L, Field_LL>(_op);
++			const auto toMemory = !(_instMove == Movel_ea ? getFieldValue<Movel_ea, Field_W>(_op) : getFieldValue<Movel_aa, Field_W>(_op));
++			if(toMemory && (lll == 4 || lll == 5))
++			{
++				ccr_s_update(r64(m_dspRegs.getALU(0)));
++				ccr_s_update(r64(m_dspRegs.getALU(1)));
++				m_sUpdatedByParallelMove = true;
++			}
++		}
+ 	
+ 		(this->*funcAlu)(_op);
+ 		m_asm.nop();
+ 		(this->*funcMove)(_op);
++		m_sUpdatedByParallelMove = false;
+ 
+ 		m_block.dspRegPool().parallelOpEpilog();
+ 		
+diff --git a/source/dsp56kEmu/jitops.h b/source/dsp56kEmu/jitops.h
+--- a/source/dsp56kEmu/jitops.h
++++ b/source/dsp56kEmu/jitops.h
+@@ -757,5 +757,6 @@
+ 		bool m_pushPCFromReg = false;
+ 		FastInterruptMode m_fastInterruptMode;
+ 		bool m_disableCCRUpdates = false;
++		bool m_sUpdatedByParallelMove = false;	// MS2000 DSP-VALID-3, see JitOps::emit(move, alu)
+ 	};
+ }
+diff --git a/source/dsp56kEmu/jitops_decode.cpp b/source/dsp56kEmu/jitops_decode.cpp
+--- a/source/dsp56kEmu/jitops_decode.cpp
++++ b/source/dsp56kEmu/jitops_decode.cpp
+@@ -620,7 +620,7 @@
+ 		// S = (A46 XOR A45) OR (B46 XOR B45) OR S in no scaling, one bit up/down in scale down/up). Measured missing
+ 		// by joelanders/dsp56300-md-mm's manual oracle (448 long-move cases); same fix as theirs (ff0f77f1):
+ 		// before the two output temps are allocated, so the x86 pool can still give ccr_s_update its temporaries.
+-		if(_lll == 4 || _lll == 5)
++		if((_lll == 4 || _lll == 5) && !m_sUpdatedByParallelMove)	// DSP-VALID-3: else done before the ALU half, see JitOps::emit
+ 		{
+ 			ccr_s_update(r64(m_dspRegs.getALU(0)));
+ 			ccr_s_update(r64(m_dspRegs.getALU(1)));

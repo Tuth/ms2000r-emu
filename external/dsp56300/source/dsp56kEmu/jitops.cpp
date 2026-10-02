@@ -396,10 +396,27 @@ namespace dsp56k
 		m_block.dspRegPool().setIsParallelOp(true, moveRegs);
 
 		emitOpProlog();
+
+		// MS2000 DSP-VALID-3: a long move that reads A or B updates S from BOTH accumulators (FM Table 5-1, rendered
+		// p.5-14). The ALU half is emitted first, and an accumulator the move does not name is not latched, so S has to
+		// be taken here, before the ALU writes it - as the interpreter does (it decodes the move before the ALU op).
+		m_sUpdatedByParallelMove = false;
+		if(_instMove == Movel_ea || _instMove == Movel_aa)
+		{
+			const auto lll = _instMove == Movel_ea ? getFieldValue<Movel_ea, Field_L, Field_LL>(_op) : getFieldValue<Movel_aa, Field_L, Field_LL>(_op);
+			const auto toMemory = !(_instMove == Movel_ea ? getFieldValue<Movel_ea, Field_W>(_op) : getFieldValue<Movel_aa, Field_W>(_op));
+			if(toMemory && (lll == 4 || lll == 5))
+			{
+				ccr_s_update(r64(m_dspRegs.getALU(0)));
+				ccr_s_update(r64(m_dspRegs.getALU(1)));
+				m_sUpdatedByParallelMove = true;
+			}
+		}
 	
 		(this->*funcAlu)(_op);
 		m_asm.nop();
 		(this->*funcMove)(_op);
+		m_sUpdatedByParallelMove = false;
 
 		m_block.dspRegPool().parallelOpEpilog();
 		

@@ -620,7 +620,7 @@ namespace dsp56k
 		// S = (A46 XOR A45) OR (B46 XOR B45) OR S in no scaling, one bit up/down in scale down/up). Measured missing
 		// by joelanders/dsp56300-md-mm's manual oracle (448 long-move cases); same fix as theirs (ff0f77f1):
 		// before the two output temps are allocated, so the x86 pool can still give ccr_s_update its temporaries.
-		if(_lll == 4 || _lll == 5)
+		if((_lll == 4 || _lll == 5) && !m_sUpdatedByParallelMove)	// DSP-VALID-3: else done before the ALU half, see JitOps::emit
 		{
 			ccr_s_update(r64(m_dspRegs.getALU(0)));
 			ccr_s_update(r64(m_dspRegs.getALU(1)));

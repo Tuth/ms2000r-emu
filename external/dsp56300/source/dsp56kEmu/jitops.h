@@ -757,5 +757,6 @@ namespace dsp56k
 		bool m_pushPCFromReg = false;
 		FastInterruptMode m_fastInterruptMode;
 		bool m_disableCCRUpdates = false;
+		bool m_sUpdatedByParallelMove = false;	// MS2000 DSP-VALID-3, see JitOps::emit(move, alu)
 	};
 }
