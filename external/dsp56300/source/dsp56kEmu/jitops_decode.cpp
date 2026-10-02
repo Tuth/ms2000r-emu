@@ -615,6 +615,17 @@ namespace dsp56k
 	}
 	void JitOps::decode_LLL_read(TWord _lll, DspValue& x, DspValue& y)
 	{
+		// MS2000 DSP-VALID: a long move that reads A or B updates S (FM Table 5-1, RENDERED p.94: S is computed "when
+		// an instruction or a parallel move reads the contents of accumulator A or B to the XDB or YDB bus",
+		// S = (A46 XOR A45) OR (B46 XOR B45) OR S in no scaling, one bit up/down in scale down/up). Measured missing
+		// by joelanders/dsp56300-md-mm's manual oracle (448 long-move cases); same fix as theirs (ff0f77f1):
+		// before the two output temps are allocated, so the x86 pool can still give ccr_s_update its temporaries.
+		if(_lll == 4 || _lll == 5)
+		{
+			ccr_s_update(r64(m_dspRegs.getALU(0)));
+			ccr_s_update(r64(m_dspRegs.getALU(1)));
+		}
+
 		x.temp(DspValue::Temp24);
 		y.temp(DspValue::Temp24);
 

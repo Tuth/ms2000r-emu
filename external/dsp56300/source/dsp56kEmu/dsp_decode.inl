@@ -659,6 +659,7 @@ namespace dsp56k
 		case 2: convert(x, regToBus(x1()));	convert(y, regToBus(x0()));	return;
 		case 3: convert(x, regToBus(y1()));	convert(y, regToBus(y0()));	return;
 		case 4:
+			sr_s_update();		// MS2000 DSP-VALID: a long move reading A or B updates S (FM Table 5-1), as the JIT does
 			if(isSixteenBitArithmetic())
 			{
 				limitTransferSixteenBitLong(reg.a, x, y);
@@ -667,6 +668,7 @@ namespace dsp56k
 			limitTransferLong(reg.a, x, y);
 			return;
 		case 5:
+			sr_s_update();		// MS2000 DSP-VALID: see case 4
 			if(isSixteenBitArithmetic())
 			{
 				limitTransferSixteenBitLong(reg.b, x, y);
