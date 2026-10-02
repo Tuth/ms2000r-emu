@@ -30,3 +30,22 @@ target_sources(MS2000R_HostTest PRIVATE HostTest.cpp)
 target_compile_definitions(MS2000R_HostTest PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
 target_link_libraries(MS2000R_HostTest PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags)
+
+# MULTI-1 (2026-10-02): several instances per process. The host loads this small VST3 module; the JUCE plugin above
+# travels in the bundle as Contents/Resources/MS2000R_engine.dll and every instance after the first runs from its
+# own copy of it (see shim/ms2k_vst3_shim.cpp). Result: build_vst/VST3_multi/MS2000R.vst3
+if(WIN32)
+    set(MS2K_VST3SDK ${JUCE_MODULES_DIR}/juce_audio_processors/format_types/VST3_SDK)   # the VST3 SDK headers JUCE carries
+    add_library(MS2000R_Shim SHARED shim/ms2k_vst3_shim.cpp
+        ${MS2K_VST3SDK}/pluginterfaces/base/coreiids.cpp ${MS2K_VST3SDK}/pluginterfaces/base/funknown.cpp)
+    target_include_directories(MS2000R_Shim PRIVATE ${MS2K_VST3SDK})
+    target_link_libraries(MS2000R_Shim PRIVATE ole32)
+    set_target_properties(MS2000R_Shim PROPERTIES OUTPUT_NAME MS2000R SUFFIX .vst3)
+    add_dependencies(MS2000R_Shim MS2000R_VST_VST3)
+    set(MS2K_MULTI ${CMAKE_BINARY_DIR}/VST3_multi/MS2000R.vst3)
+    add_custom_command(TARGET MS2000R_Shim POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${MS2K_MULTI}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MS2K_MULTI}/Contents/x86_64-win ${MS2K_MULTI}/Contents/Resources
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:MS2000R_VST_VST3> ${MS2K_MULTI}/Contents/Resources/MS2000R_engine.dll
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:MS2000R_Shim> ${MS2K_MULTI}/Contents/x86_64-win/MS2000R.vst3)
+endif()

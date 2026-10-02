@@ -3,7 +3,8 @@
 // frame offset, MIDI OUT (the firmware's TDR1 stream) regrouped into messages and handed back to the host.
 //
 // STATED for phase 1:
-//  - one instance per process (the emulator core keeps function-local statics and globals);
+//  - one machine per copy of this binary (the emulator core keeps function-local statics and globals); MULTI-1
+//    (2026-10-02): the bundle's loader module (shim/ms2k_vst3_shim.cpp) gives every further instance its own copy;
 //  - the emulator opens its files by relative path, so the plugin makes the MS2000 folder the process's
 //    working directory: MS2K_HOME, else Documents\MS2000R, else a folder above the plugin binary - the first holding flash.bin;
 //  - audio input (vocoder / Audio In) is passed through only at a host rate of 48 kHz;
@@ -24,6 +25,7 @@
 
 namespace {
 std::atomic<bool> g_machineTaken{ false };
+std::atomic<int> g_liveProcessors{ 0 };   // MULTI-1: read by the loader module (ms2k_liveProcessors)
 
 bool validHome(const juce::File& d)
 {
@@ -39,7 +41,10 @@ juce::File findHome()
     if (homeSetting().existsAsFile()) cands.add(homeSetting().loadFileAsString().trim());
     cands.add(juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("MS2000R").getFullPathName());
     // PUBLIC-1: the folders above the plugin binary (...\X\VST3\MS2000R.vst3\Contents\x86_64-win\MS2000R.vst3 -> X)
-    for (auto d = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory(); d.exists() && cands.size() < 16; d = d.getParentDirectory()) {
+    // MULTI-1: an engine copy runs from %TEMP%; the loader module names the real plugin binary in MS2K_PLUGIN_BINARY
+    const auto loader = juce::SystemStats::getEnvironmentVariable("MS2K_PLUGIN_BINARY", {});
+    const juce::File binary = loader.isNotEmpty() ? juce::File(loader) : juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    for (auto d = binary.getParentDirectory(); d.exists() && cands.size() < 16; d = d.getParentDirectory()) {
         cands.add(d.getFullPathName());
         if (d.isRoot()) break;
     }
@@ -56,6 +61,7 @@ Ms2kProcessor::Ms2kProcessor()
                          .withInput("Audio In", juce::AudioChannelSet::stereo(), false)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
+    ++g_liveProcessors;
     for (auto& m : knobs) for (auto& v : m) v = 512;     // every pot at its centre, as the standalone's default
     m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
     m_syx.setClock([this] { return double(m_frames.load(std::memory_order_relaxed)) / (m_hostRate > 0 ? m_hostRate : 48000.0); });   // machine time
@@ -93,7 +99,12 @@ Ms2kProcessor::~Ms2kProcessor()
     stopTimer();
     stopMachine();
     if (m_owner) g_machineTaken = false;
+    --g_liveProcessors;
 }
+
+// MULTI-1: how many machines this copy of the binary holds; the loader module (shim/ms2k_vst3_shim.cpp) gives a new
+// instance a copy where this is 0
+extern "C" __declspec(dllexport) int ms2k_liveProcessors() { return g_liveProcessors.load(); }
 
 void Ms2kProcessor::stopMachine()
 {

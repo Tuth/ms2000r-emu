@@ -9,6 +9,9 @@
 //   mode "noin"   (VST3-2): the input bus disabled - an A/B for the Audio In path.
 //   mode "syx"    (SYX-1): plays with the message loop running, so MS2K_SYXIMPORT / MS2K_SYXEXPORT work.
 //   mode "clock"  (MIDI-CLOCK): a 140 BPM transport, playing the first half, stopped the second (MS2K_MIDILOG shows the F8s).
+//   mode "multi"  (MULTI-1): three instances in this process, played block by block in turn: #0 the usual note
+//                 (its WAV is <out.wav>, compare it with a single-instance run), #1 a G4 1.5 s later, #2 no note
+//                 (<out>_1.wav, <out>_2.wav). Needs the multi bundle (build_vst/VST3_multi).
 //   mode "reboot" (VST3-2): 1 s in, a state with a different flash is set while the machine runs (a power
 //                 cycle); the note is played 5 s after that; the WAV / RMS show the machine came back.
 #include <JuceHeader.h>
@@ -25,6 +28,7 @@
 namespace {
 std::vector<double> g_blockMs;   // PERF-VST: the time of every processBlock call
 bool g_pump = false;
+int g_note = 60;                 // MULTI-1: the key play() presses
 bool g_echo = false;             // SYX-1b: the plugin's MIDI OUT fed back into its MIDI IN (a host loop)
 juce::MidiBuffer g_echoBuf;
 // MIDI-CLOCK: a host transport - 140 BPM, playing for the first half of the run, stopped for the second
@@ -56,8 +60,8 @@ void play(juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& out, int fr
         buf.setSize(buf.getNumChannels(), n, false, false, true);
         buf.clear();
         juce::MidiBuffer midi;
-        if (noteOn >= pos && noteOn < pos + n) midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), noteOn - pos);
-        if (noteOff >= pos && noteOff < pos + n) midi.addEvent(juce::MidiMessage::noteOff(1, 60), noteOff - pos);
+        if (noteOn >= pos && noteOn < pos + n) midi.addEvent(juce::MidiMessage::noteOn(1, g_note, (juce::uint8)100), noteOn - pos);
+        if (noteOff >= pos && noteOff < pos + n) midi.addEvent(juce::MidiMessage::noteOff(1, g_note), noteOff - pos);
         if (g_echo) { for (const auto m : g_echoBuf) midi.addEvent(m.getMessage(), 0); g_echoBuf.clear(); }
         if (g_head) g_head->pos = pos;
         const double t0 = juce::Time::getMillisecondCounterHiRes();
@@ -220,6 +224,54 @@ int main(int argc, char** argv)
             juce::MessageManager::getInstance()->runDispatchLoopUntil(8);
         }
         win.clearContentComponent(); ed.reset();
+    } else if (mode == "multi" || mode == "multied") {
+        std::vector<std::unique_ptr<juce::AudioPluginInstance>> more;
+        for (int i = 1; i < 3; ++i) { more.push_back(load(fmt, *descs[0], rate, block)); if (!more.back()) return 3; }
+        inst->prepareToPlay(rate, block);
+        for (auto& m : more) m->prepareToPlay(rate, block);
+        std::vector<juce::AudioBuffer<float>> outs(more.size(), juce::AudioBuffer<float>(2, juce::jmax(1, total)));
+        for (auto& o : outs) o.clear();
+        int mo = 0;
+        const int shift = int(1.5 * rate);
+        // multied: the first two instances' editors open in windows while they play (two JUCE copies, one message loop)
+        std::vector<std::unique_ptr<juce::AudioProcessorEditor>> eds;
+        std::vector<std::unique_ptr<juce::DocumentWindow>> wins;
+        if (mode == "multied")
+            for (auto* p : { inst.get(), more[0].get() }) {
+                eds.emplace_back(p->createEditorIfNeeded());
+                if (!eds.back()) { std::cerr << "no editor\n"; return 6; }
+                wins.push_back(std::make_unique<juce::DocumentWindow>("MS2000R multi " + juce::String(int(wins.size())), juce::Colours::black, 0));
+                wins.back()->setUsingNativeTitleBar(true);
+                wins.back()->setContentNonOwned(eds.back().get(), true);
+                wins.back()->setTopLeftPosition(40 + 60 * int(wins.size()), 40 + 60 * int(wins.size()));
+                wins.back()->setVisible(true);
+            }
+        for (int pos = 0; pos < total; pos += block) {
+            const int end = juce::jmin(total, pos + block);
+            g_note = 60; play(*inst, out, pos, end, block, noteOn, noteOff, midiOutEvents);
+            g_note = 67; play(*more[0], outs[0], pos, end, block, noteOn + shift, noteOff + shift, mo);
+            g_note = 60; play(*more[1], outs[1], pos, end, block, -1, -1, mo);
+            if (!wins.empty() && ((pos / block) % 8) == 0) juce::MessageManager::getInstance()->runDispatchLoopUntil(4);
+        }
+        for (auto& w : wins) w->clearContentComponent();
+        eds.clear(); wins.clear();
+        for (size_t i = 0; i < more.size(); ++i) {
+            const juce::String name = juce::String(argv[2]).upToLastOccurrenceOf(".", false, false) + "_" + juce::String(int(i) + 1) + ".wav";
+            juce::File f(juce::File::getCurrentWorkingDirectory().getChildFile(name));
+            f.deleteFile();
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(new juce::FileOutputStream(f), rate, 2, 24, {}, 0));
+            if (w) w->writeFromAudioSampleBuffer(outs[i], 0, total);
+            std::cout << "instance " << (i + 1) << ": ";
+            for (int sec = 0; sec < int(secs); ++sec) {
+                const float r = outs[i].getRMSLevel(0, int(sec * rate), juce::jmin(int(rate), total - int(sec * rate)));
+                std::cout << sec << ":" << (r > 0 ? juce::roundToInt(20.0 * std::log10(r)) : -240) << " ";
+            }
+            std::cout << "\n";
+            more[i]->releaseResources();
+        }
+        more.clear();
+        std::cout << "instance 0: ";
     } else if (total > 0) {
         inst->prepareToPlay(rate, block);   // (knobs0: the state was set above)
         play(*inst, out, 0, total, block, noteOn, noteOff, midiOutEvents);

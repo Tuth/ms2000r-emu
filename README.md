@@ -24,8 +24,11 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
   edited has its values (read from the machine's edit buffer); turning one takes over from there without a jump.
 - VST3 (phase 2): the panel in the plugin window; the machine's state (knob positions, settings and the written
   flash sectors) is saved in the host project.
+- Several plugin instances in one host: the plugin bundle carries the engine as
+  `Contents\Resources\MS2000R_engine.dll`; every instance after the first runs from its own copy of it in
+  `%TEMP%\MS2000R_engines` (removed when the host unloads the plugin), so each instance is a separate machine.
 
-Known limits: Windows only; one plugin instance per process; old hosts (VSTHost) can hang when leaving the demo
+Known limits: Windows only; old hosts (VSTHost) can hang when leaving the demo
 songs. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
 96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
 Next: a preset library page.
@@ -72,8 +75,10 @@ VST3 plugin (JUCE is fetched at configure time):
 
 ```
 cmake -S . -B build_vst -G "Visual Studio 17 2022" -DMS2K_BUILD_VST3=ON
-cmake --build build_vst --config Release --target MS2000R_VST_VST3
+cmake --build build_vst --config Release --target MS2000R_Shim
 ```
+
+The finished plugin bundle is `build_vst\VST3_multi\MS2000R.vst3` (the loader module plus the engine).
 
 The plugin looks for the folder holding `flash.bin` in `MS2K_HOME`, then `Documents\MS2000R`, then the folders
 above the plugin binary.
