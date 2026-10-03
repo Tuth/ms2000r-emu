@@ -69,6 +69,8 @@ private:
     double m_clockTick = 0.0;                // MIDI-CLOCK: where the free-running clock stands (in clocks)
     bool m_wasPlaying = false, m_startPending = false;      // host frames played since the machine started
     int m_syxDiag = 0;
+    int m_demoDiag = 0;   // DEMO-FMT-1 diag: MS2K_DEMOAT
+    int m_ramDumps = 0;   // DEMO-FMT-1 diag: MS2K_RAMDUMPAT
     bool bootMachine();                      // once, on the first prepareToPlay
     bool startMachine();                     // the power-on itself (boot and reboot)
     void stopMachine();

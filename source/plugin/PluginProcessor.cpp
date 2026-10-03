@@ -241,6 +241,29 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     if (!machine.owns_lock() || !m_runner || N <= 0) { buffer.clear(); midi.clear(); return; }
     auto* dsp = m_runner->getEmulator().dsp();
 
+    // DEMO-FMT-1 diag (off unless set): MS2K_DEMOAT=<s> presses the demo keys at that machine time, as the Settings
+    // button does (EXIT, GLOBAL 200 ms later, both up after 1.4 s) - in machine time, so a run is repeatable
+    if (static const char* demoAt = std::getenv("MS2K_DEMOAT"); demoAt && m_demoDiag < 3) {
+        const double t = double(m_frames.load(std::memory_order_relaxed)) / m_hostRate, t0 = std::atof(demoAt);
+        if (m_demoDiag == 0 && t >= t0) { setSwitch(4, 0, true); m_demoDiag = 1; }
+        else if (m_demoDiag == 1 && t >= t0 + 0.2) { setSwitch(3, 6, true); m_demoDiag = 2; }
+        else if (m_demoDiag == 2 && t >= t0 + 1.4) { setSwitch(3, 6, false); setSwitch(4, 0, false); m_demoDiag = 3; }
+    }
+
+    // DEMO-FMT-1 diag (off unless set): MS2K_RAMDUMPAT=<s>[,<s>...]|<prefix> writes the DRAM (0x400000-0x47FFFF)
+    // to <prefix>_<n>.bin at those machine times
+    if (static const char* rd = std::getenv("MS2K_RAMDUMPAT"); rd) {
+        const std::string a(rd); const auto bar = a.find('|');
+        std::vector<double> at; for (size_t p = 0; p < bar;) { at.push_back(std::atof(a.c_str() + p)); p = a.find(',', p); if (p == std::string::npos || p > bar) break; ++p; }
+        const double t = double(m_frames.load(std::memory_order_relaxed)) / m_hostRate;
+        if (bar != std::string::npos && m_ramDumps < int(at.size()) && t >= at[size_t(m_ramDumps)]) {
+            std::vector<uint8_t> ram(0x80000);
+            for (uint32_t i = 0; i < 0x80000u; ++i) ram[i] = m_runner->getEmulator().peekExternal(0x400000u + i);
+            if (FILE* f = std::fopen((a.substr(bar + 1) + "_" + std::to_string(m_ramDumps) + ".bin").c_str(), "wb")) { std::fwrite(ram.data(), 1, ram.size(), f); std::fclose(f); }
+            ++m_ramDumps;
+        }
+    }
+
     // Audio In: input 1 = left, input 2 = right; at another host rate resampled to 48 kHz first (VST3-2).
     const int nIn = getTotalNumInputChannels();
     if (dsp && nIn > 0) {

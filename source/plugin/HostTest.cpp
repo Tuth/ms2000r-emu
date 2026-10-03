@@ -22,6 +22,7 @@
 #include <windows.h>
 #endif
 #include <iostream>
+#include <cstring>
 #include <algorithm>
 #include <vector>
 
@@ -29,6 +30,7 @@ namespace {
 std::vector<double> g_blockMs;   // PERF-VST: the time of every processBlock call
 bool g_pump = false;
 int g_note = 60;                 // MULTI-1: the key play() presses
+std::vector<std::pair<int, juce::MidiMessage>> g_smf;   // DEMO-FMT-1: mode "smf" - a MIDI file's events at host samples
 bool g_echo = false;             // SYX-1b: the plugin's MIDI OUT fed back into its MIDI IN (a host loop)
 juce::MidiBuffer g_echoBuf;
 // MIDI-CLOCK: a host transport - 140 BPM, playing for the first half of the run, stopped for the second
@@ -63,6 +65,7 @@ void play(juce::AudioPluginInstance& inst, juce::AudioBuffer<float>& out, int fr
         if (noteOn >= pos && noteOn < pos + n) midi.addEvent(juce::MidiMessage::noteOn(1, g_note, (juce::uint8)100), noteOn - pos);
         if (noteOff >= pos && noteOff < pos + n) midi.addEvent(juce::MidiMessage::noteOff(1, g_note), noteOff - pos);
         if (g_echo) { for (const auto m : g_echoBuf) midi.addEvent(m.getMessage(), 0); g_echoBuf.clear(); }
+        for (const auto& e : g_smf) if (e.first >= pos && e.first < pos + n) midi.addEvent(e.second, e.first - pos);
         if (g_head) g_head->pos = pos;
         const double t0 = juce::Time::getMillisecondCounterHiRes();
         inst.processBlock(buf, midi);
@@ -182,6 +185,37 @@ int main(int argc, char** argv)
         std::cout << "knobs all 0, " << flashOf(t) << "\n";
     }
 
+    if (mode == "smf") {   // DEMO-FMT-1: MS2K_SMF=<file.mid> played into MIDI IN from MS2K_SMFAT seconds (default 3), no test note.
+        // As the firmware's demo player does (0x22952, read from the disassembly; checked byte for byte with
+        // MS2K_REGWATCH=2566): every event in FILE order (equal ticks keep their order - juce::MidiFile does not),
+        // running status, F0 SysEx, FF 51 tempo; and a MIDI clock F8 every division/24 ticks from the start.
+        juce::MemoryBlock mb;
+        juce::File(juce::File::getCurrentWorkingDirectory().getChildFile(juce::SystemStats::getEnvironmentVariable("MS2K_SMF", {}))).loadFileAsData(mb);
+        const auto* d = static_cast<const uint8_t*>(mb.getData()); const size_t sz = mb.getSize();
+        if (sz < 22 || std::memcmp(d, "MThd", 4) != 0) { std::cerr << "cannot read MS2K_SMF\n"; return 7; }
+        const int division = (d[12] << 8) | d[13];
+        const double at = juce::SystemStats::getEnvironmentVariable("MS2K_SMFAT", "3").getDoubleValue();
+        const bool clocks = juce::SystemStats::getEnvironmentVariable("MS2K_SMFCLOCK", "1") != "0";
+        size_t a = 22; uint64_t tick = 0, lastTick = 0; double sec = 0, spt = 0.5 / division; uint8_t run = 0;
+        auto vlq = [&] { uint32_t v = 0; while (a < sz) { const uint8_t b = d[a++]; v = (v << 7) | (b & 0x7F); if (!(b & 0x80)) break; } return v; };
+        auto timeOf = [&](uint64_t t) { sec += double(t - lastTick) * spt; lastTick = t; return int((at + sec) * rate); };
+        uint64_t nextClock = 0; const uint32_t clockTicks = uint32_t(division / 24);
+        while (a < sz) {
+            tick += vlq();
+            while (clocks && nextClock <= tick) { g_smf.emplace_back(timeOf(nextClock), juce::MidiMessage(0xF8)); nextClock += clockTicks; }
+            const int pos = timeOf(tick);
+            const uint8_t st = d[a];
+            if (st == 0xFF) { const uint8_t typ = d[a + 1]; a += 2; const uint32_t ln = vlq();
+                if (typ == 0x51 && ln == 3) spt = double((d[a] << 16) | (d[a + 1] << 8) | d[a + 2]) * 1e-6 / division;
+                a += ln; if (typ == 0x2F) break; continue; }
+            if (st == 0xF0) { ++a; const uint32_t ln = vlq(); std::vector<uint8_t> x(1, 0xF0); x.insert(x.end(), d + a, d + a + ln); a += ln;
+                g_smf.emplace_back(pos, juce::MidiMessage(x.data(), int(x.size()))); continue; }
+            if (st & 0x80) { run = st; ++a; }
+            const int n = ((run & 0xF0) == 0xC0 || (run & 0xF0) == 0xD0) ? 1 : 2;
+            g_smf.emplace_back(pos, n == 1 ? juce::MidiMessage(run, d[a]) : juce::MidiMessage(run, d[a], d[a + 1])); a += size_t(n);
+        }
+        std::cout << "smf: " << g_smf.size() << " events (" << (clocks ? "with" : "no") << " F8 clock) from " << at << " s\n";
+    }
     if (mode == "syx" || mode == "syxecho") g_pump = true;
     TestHead head;
     if (mode == "clock") { head.rate = rate; head.startAt = int64_t(5.0 * rate); head.stopAt = int64_t(secs * rate * 0.75); g_head = &head; inst->setPlayHead(&head); }
@@ -190,6 +224,7 @@ int main(int argc, char** argv)
     juce::AudioBuffer<float> out(2, juce::jmax(1, total));
     out.clear();
     int midiOutEvents = 0, noteOn = int(4.0 * rate), noteOff = int(7.0 * rate);
+    if (mode == "smf" || std::getenv("MS2K_DEMOAT")) noteOn = noteOff = -1;   // DEMO-FMT-1: no test note
     const auto t0 = juce::Time::getMillisecondCounterHiRes();
     if (mode == "reboot") {
         inst->prepareToPlay(rate, block);
