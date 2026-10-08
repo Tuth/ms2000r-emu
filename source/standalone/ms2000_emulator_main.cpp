@@ -1100,7 +1100,11 @@ int main(int argc, char** argv) {
         }
         std::cout << "Starting test GUI (Win32/DX11 + ImGui)...\n";
         (void)guiCfg;
-        return run_thin_gui(runner);
+        return run_thin_gui(runner, [&]() {   // PWR-SW-1: the VOLUME switch's power-on = a new machine, same config
+            auto r = std::make_unique<MS2000::Ms2kRunner>(cfg, hooks);
+            if (!r->init()) r.reset();
+            return r;
+        });
 #else
         std::cout << "GUI mode requested but ImGui support not available.\n";
         std::cout << "Fallback to headless mode with diagnostics enabled.\n";

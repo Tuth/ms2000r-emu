@@ -66,6 +66,8 @@ private:
     juce::TextButton m_demo{ "Demo songs  (EXIT + GLOBAL)" };
     juce::TextButton m_syxLoad{ "Load .syx..." }, m_syxSave{ "Save all programs as .syx..." };
     juce::Label m_syxStatus;
+    juce::Slider m_boost;                              // OUT-BOOST-1
+    juce::Label m_boostLbl;
     juce::ToggleButton m_powerSw{ "POWER switch on the Master VOLUME: off at the minimum, as on the unit (off: a fade to 0 keeps it running)" };
     juce::ToggleButton m_sysexOut{ "MIDI OUT SysEx -> host  (off for hosts that stop on a plugin's SysEx output, e.g. VSTHost)" };
     juce::ToggleButton m_transport{ "Host transport -> Start / Stop  (the arpeggiator starts on a quarter note with the host)" };

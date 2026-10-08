@@ -67,6 +67,21 @@ Ms2kProcessor::Ms2kProcessor()
     ++g_liveProcessors;
     for (auto& m : knobs) for (auto& v : m) v = 512;     // every pot at its centre, as the standalone's default
     loadGlobalSettings();                                // SETTINGS-1
+    // AUTOMATION-1: one host parameter per physical control (panel_params.h)
+    for (auto& r : m_knobParam) for (auto& v : r) v = -1;
+    for (auto& r : m_keyParam) for (auto& v : r) v = -1;
+    for (int i = 0; i < ms2kparams::kCount; ++i) {
+        const auto& d = ms2kparams::kParams[i];
+        const juce::ParameterID pid{ d.id, 1 };
+        juce::RangedAudioParameter* p = nullptr;
+        if (d.kind == ms2kparams::kKey || d.kind == ms2kparams::kMic) p = new juce::AudioParameterBool(pid, d.name, false);
+        else p = new juce::AudioParameterFloat(pid, d.name, juce::NormalisableRange<float>(0.0f, 1.0f), d.kind == ms2kparams::kKnob ? 512.0f / 1023.0f : 1.0f);
+        addParameter(p);
+        m_params[size_t(i)] = p;
+        if (d.kind == ms2kparams::kKnob) m_knobParam[d.a][d.b] = i;
+        if (d.kind == ms2kparams::kKey) m_keyParam[d.a][d.b] = i;
+    }
+    syncParams();
     m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
     m_syx.setClock([this] { return double(m_frames.load(std::memory_order_relaxed)) / (m_hostRate > 0 ? m_hostRate : 48000.0); });   // machine time
     startTimerHz(10);
@@ -196,6 +211,105 @@ void Ms2kProcessor::clearStreams()
     for (int ch = 0; ch < 2; ++ch) { m_inFifo[ch].clear(); m_inInterp[ch].reset(); }
 }
 
+// ---- AUTOMATION-1 ----
+float Ms2kProcessor::panelValue(int i) const
+{
+    const auto& d = ms2kparams::kParams[i];
+    switch (d.kind) {
+    case ms2kparams::kKnob:   return float(knobs[d.a][d.b]) / 1023.0f;
+    case ms2kparams::kKey:    return m_swHeld[d.a][d.b] ? 1.0f : 0.0f;
+    case ms2kparams::kVolume: return volume;
+    case ms2kparams::kIn1:    return in1;
+    case ms2kparams::kIn2:    return in2;
+    case ms2kparams::kMic:    return mic2 ? 1.0f : 0.0f;
+    }
+    return 0.0f;
+}
+
+void Ms2kProcessor::syncParams()
+{
+    for (int i = 0; i < ms2kparams::kCount; ++i) {
+        const float v = panelValue(i);
+        m_applied[size_t(i)].store(v);
+        if (std::abs(m_params[size_t(i)]->getValue() - v) > 1.0e-6f) m_params[size_t(i)]->setValueNotifyingHost(v);
+    }
+}
+
+// Audio thread. live = the machine lock is held and a machine runs; otherwise the control is only stored (the next
+// power-on / reboot sets it into the machine with applyPanel).
+void Ms2kProcessor::pollParams(bool live)
+{
+    bool stage = false;
+    for (int i = 0; i < ms2kparams::kCount; ++i) {
+        const float v = m_params[size_t(i)]->getValue();
+        if (std::abs(v - m_applied[size_t(i)].load(std::memory_order_relaxed)) <= 1.0e-6f) continue;
+        m_applied[size_t(i)].store(v, std::memory_order_relaxed);
+        const auto& d = ms2kparams::kParams[i];
+        switch (d.kind) {
+        case ms2kparams::kKnob: {
+            const uint16_t q = uint16_t(juce::jlimit(0, 1023, int(v * 1023.0f + 0.5f)));
+            if (live) setKnob(d.a, d.b, q); else knobs[d.a][d.b] = q;
+            break; }
+        case ms2kparams::kKey:
+            if (live) setSwitch(d.a, d.b, v >= 0.5f); else m_swHeld[d.a][d.b] = v >= 0.5f;
+            break;
+        case ms2kparams::kVolume: volume = v; applyVolume(); break;
+        case ms2kparams::kIn1: in1 = v; stage = true; break;
+        case ms2kparams::kIn2: in2 = v; stage = true; break;
+        case ms2kparams::kMic: mic2 = v >= 0.5f; stage = true; break;
+        }
+    }
+    if (stage && live) applyInputStage();
+}
+
+void Ms2kProcessor::userParam(int i, float v)
+{
+    if (i < 0) return;
+    auto* p = m_params[size_t(i)];
+    if (!m_gesture[size_t(i)]) { p->beginChangeGesture(); m_gesture[size_t(i)] = true; m_anyGesture = true; }
+    m_applied[size_t(i)].store(v);
+    p->setValueNotifyingHost(v);
+}
+
+void Ms2kProcessor::userKnob(unsigned mux, unsigned x, uint16_t v)
+{
+    setKnob(mux, x, v);
+    if (mux < 4 && x < 8) userParam(m_knobParam[mux][x], float(v) / 1023.0f);
+}
+
+void Ms2kProcessor::userKey(unsigned col, unsigned row, bool down)
+{
+    setSwitch(col, row, down);
+    if (col < 8 && row < 8) userParam(m_keyParam[col][row], down ? 1.0f : 0.0f);
+}
+
+void Ms2kProcessor::userVolume()
+{
+    applyVolume();
+    for (int i = 0; i < ms2kparams::kCount; ++i)
+        if (ms2kparams::kParams[i].kind == ms2kparams::kVolume) userParam(i, volume);
+}
+
+void Ms2kProcessor::userInputs()
+{
+    applyInputStage();
+    for (int i = 0; i < ms2kparams::kCount; ++i) {
+        const auto k = ms2kparams::kParams[i].kind;
+        if (k == ms2kparams::kIn1 || k == ms2kparams::kIn2 || k == ms2kparams::kMic) {
+            const float v = panelValue(i);
+            if (std::abs(m_params[size_t(i)]->getValue() - v) > 1.0e-6f) userParam(i, v);
+        }
+    }
+}
+
+void Ms2kProcessor::endUserEdits()
+{
+    if (!m_anyGesture) return;
+    for (int i = 0; i < ms2kparams::kCount; ++i)
+        if (m_gesture[size_t(i)]) { m_params[size_t(i)]->endChangeGesture(); m_gesture[size_t(i)] = false; }
+    m_anyGesture = false;
+}
+
 // PWR-SW-1: the Master VR's switch. Off: the flash is kept (the project's state from now on, the chip image in a
 // DEV-FLASH build), the machine stops - dark LCD, silence. On: a cold boot from that flash, held keys down.
 void Ms2kProcessor::powerSwitchPoll()
@@ -320,6 +434,7 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     m_blocks.fetch_add(1, std::memory_order_relaxed);   // HOSTDIAG-1
     const int N = buffer.getNumSamples();
     std::unique_lock<std::mutex> machine(m_machineMx, std::try_to_lock);   // a reboot holds it: silence
+    pollParams(machine.owns_lock() && m_runner);                            // AUTOMATION-1: host automation -> panel
     if (!machine.owns_lock() || !m_runner || N <= 0) { buffer.clear(); midi.clear(); return; }
     auto* dsp = m_runner->getEmulator().dsp();
 
@@ -583,6 +698,7 @@ void Ms2kProcessor::loadGlobalSettings()
     dspThread = p.getBoolValue("dspThread", dspThread.load());
     sysexOut = p.getBoolValue("sysexOut", sysexOut.load());
     powerSwitch = p.getBoolValue("powerSwitch", powerSwitch.load());
+    boostDb = juce::jlimit(0, 12, p.getIntValue("boostDb", boostDb.load()));
     editorWDefault = p.getIntValue("editorW", 0);
 }
 
@@ -597,6 +713,7 @@ void Ms2kProcessor::saveGlobalSettings() const
     p.setValue("dspThread", dspThread.load());
     p.setValue("sysexOut", sysexOut.load());
     p.setValue("powerSwitch", powerSwitch.load());
+    p.setValue("boostDb", boostDb.load());
     if (editorWDefault >= 700) p.setValue("editorW", editorWDefault);
     p.saveIfNeeded();
 }
@@ -620,6 +737,7 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("dspThread", dspThread.load(), nullptr);
     t.setProperty("sysexOut", sysexOut.load(), nullptr);
     t.setProperty("powerSwitch", powerSwitch.load(), nullptr);
+    t.setProperty("boostDb", boostDb.load(), nullptr);
     t.setProperty("libraryPath", libraryPath, nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
@@ -656,7 +774,9 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     dspThread = bool(t.getProperty("dspThread", false));
     sysexOut = bool(t.getProperty("sysexOut", sysexOut.load()));
     powerSwitch = bool(t.getProperty("powerSwitch", powerSwitch.load()));
+    boostDb = juce::jlimit(0, 12, int(t.getProperty("boostDb", boostDb.load())));
     libraryPath = t.getProperty("libraryPath", "").toString();
+    syncParams();                                        // AUTOMATION-1: the parameters show this project's panel
 
     // the flash this project's machine had
     const uint32_t mask = uint32_t(int(t.getProperty("flashMask", 0))) & ((1u << MS2000::FlashROM::NUM_SECTORS) - 1u);

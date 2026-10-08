@@ -169,6 +169,17 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_powerSw.onClick = [this] { m_proc.powerSwitch = m_powerSw.getToggleState(); m_proc.saveGlobalSettings(); };
     m_powerSw.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     addChildComponent(m_powerSw);
+    // OUT-BOOST-1: master output boost after the VOLUME pot, 0..+12 dB in 1 dB steps (global default + project)
+    m_boost.setSliderStyle(juce::Slider::LinearHorizontal);
+    m_boost.setRange(0.0, 12.0, 1.0);
+    m_boost.setTextValueSuffix(" dB");
+    m_boost.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 60, 22);
+    m_boost.setValue(double(m_proc.boostDb.load()), juce::dontSendNotification);
+    m_boost.onValueChange = [this] { m_proc.boostDb = int(m_boost.getValue()); m_proc.applyVolume(); m_proc.saveGlobalSettings(); };
+    addChildComponent(m_boost);
+    m_boostLbl.setText("Output boost after the VOLUME pot (+dB, above 0 dB full scale the host clips)", juce::dontSendNotification);
+    m_boostLbl.setColour(juce::Label::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_boostLbl);
     // LIBRARY-1
     m_list.setModel(this);
     m_list.setRowHeight(22);
@@ -183,7 +194,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
         });
     };
     if (m_proc.libraryPath.isNotEmpty()) loadLibrary(m_proc.libraryPath);
-    m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); m_proc.saveGlobalSettings(); };
+    m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.userInputs(); m_proc.endUserEdits(); m_proc.saveGlobalSettings(); };
     m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); m_proc.saveGlobalSettings(); };
     m_syxLoad.onClick = [this] {
         m_chooser = std::make_unique<juce::FileChooser>("Load a .syx into the MS2000R", juce::File(), "*.syx");
@@ -241,14 +252,15 @@ Ms2kEditor::~Ms2kEditor()
     if (getWidth() >= 700) { m_proc.editorWDefault = getWidth(); m_proc.saveGlobalSettings(); }   // UI-SIZE-1
     if (m_demoPhase) { m_proc.setSwitch(3, 6, false); m_proc.setSwitch(4, 0, false); m_demoPhase = 0; }
     m_io.releaseAll();   // STATED: a key held by the mouse or LATCH is let go when the editor closes
+    m_proc.endUserEdits();   // AUTOMATION-1
 }
 
 void Ms2kEditor::setupIo()
 {
     m_io.lit = m_lit; m_io.shown = m_shown; m_io.knobs = m_proc.knobs;
     m_io.volume = &m_proc.volume; m_io.in1 = &m_proc.in1; m_io.in2 = &m_proc.in2;
-    m_io.sw = [this](unsigned c, unsigned r, bool d) { if (m_demoPhase == 0) m_proc.setSwitch(c, r, d); };
-    m_io.knob = [this](unsigned m, unsigned x, uint16_t v) { m_proc.setKnob(m, x, v); m_lastMoved = int(m * 8 + x); m_lastMoveMs = juce::Time::getMillisecondCounter(); };
+    m_io.sw = [this](unsigned c, unsigned r, bool d) { if (m_demoPhase == 0) m_proc.userKey(c, r, d); };   // AUTOMATION-1
+    m_io.knob = [this](unsigned m, unsigned x, uint16_t v) { m_proc.userKnob(m, x, v); m_lastMoved = int(m * 8 + x); m_lastMoveMs = juce::Time::getMillisecondCounter(); };
 }
 
 void Ms2kEditor::showTab(int t)
@@ -257,7 +269,7 @@ void Ms2kEditor::showTab(int t)
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
     m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
-    m_transport.setVisible(t == 1); m_sysexOut.setVisible(t == 1); m_powerSw.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
+    m_transport.setVisible(t == 1); m_sysexOut.setVisible(t == 1); m_powerSw.setVisible(t == 1); m_boost.setVisible(t == 1); m_boostLbl.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
@@ -289,6 +301,7 @@ void Ms2kEditor::resized()
     m_transport.setBounds(r.removeFromTop(30));
     m_sysexOut.setBounds(r.removeFromTop(30));
     m_powerSw.setBounds(r.removeFromTop(30));
+    { auto row = r.removeFromTop(30); m_boost.setBounds(row.removeFromLeft(260)); m_boostLbl.setBounds(row); }
     m_follow.setBounds(r.removeFromTop(30));
     m_dspThr.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
@@ -313,8 +326,8 @@ void Ms2kEditor::runInput()
     InputBackend be(m_mouse);
     m_io.stageChanged = m_io.volumeChanged = false;
     VPanel::draw(m_io, be, VPanel::V2(pa.getX(), pa.getY()), VPanel::V2(pa.getWidth(), pa.getHeight()));
-    if (m_io.stageChanged) m_proc.applyInputStage();
-    if (m_io.volumeChanged) m_proc.applyVolume();
+    if (m_io.stageChanged) m_proc.userInputs();
+    if (m_io.volumeChanged) m_proc.userVolume();
     m_mouse.press = m_mouse.dbl = false; m_mouse.dragY = m_mouse.wheel = 0.0f;
     m_dirty = true; repaint();
 }
@@ -362,6 +375,8 @@ void Ms2kEditor::testClick(float px, float py, bool shift)
 // ---- the timer: LEDs, LCD, demo keys ----
 void Ms2kEditor::timerCallback()
 {
+    // AUTOMATION-1: a host gesture lasts while the mouse button is down (wheel steps end on the next tick)
+    if (!juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown()) m_proc.endUserEdits();
     if (!isShowing() && m_testTick < 0 && m_demoPhase == 0) return;   // DSP-THREAD b: nothing to draw while hidden/minimised
     if (m_testTick >= 0) {
         ++m_testTick;

@@ -1,4 +1,4 @@
-# ms2000r-emu  (v0.9.4)
+# ms2000r-emu  (v0.9.5)
 
 A hardware-level emulator of the **KORG MS2000R** (rack version of the MS2000 analog-modeling synthesizer):
 the H8S/2350 main CPU runs the original firmware instruction by instruction, and the DSP56362 runs the
@@ -17,7 +17,18 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - Output: the AK4522 DAC's digital filter and the line-output coupling (KOD-A30413), and the POWER/VOLUME pot as the
   real 10 kOhm linear Master VR loaded by the next stage. At its minimum the pot's switch turns the machine off
   (dark panel, the flash is kept); turning it up is a cold boot with the held keys down. Plugin Settings can disable
-  the switch, so a DAW fade to 0 keeps the machine running.
+  the switch, so a DAW fade to 0 keeps the machine running. The standalone has the same switch (its VOLUME pot or
+  slider) and the same pot law. An Output boost of 0..+12 dB (1 dB steps) after the pot: plugin Settings, standalone
+  slider - at 0 dB the output is unchanged.
+- DAW automation (plugin): 59 host parameters, each one a PHYSICAL control - the 32 pots, POWER/VOLUME, AUDIO IN 1/2,
+  IN 2 MIC/LINE and 23 sound/performance keys (momentary, 1 = held). An automated pot is a hand on the pot: the
+  firmware reads it and sends its own CCs as on the unit; the plugin never makes MIDI from a parameter, and nothing
+  the machine does moves a parameter (the pots are not motorised) - so automation and MIDI CC tracks never fight.
+  Mouse moves on the panel are recorded in Write/Touch mode.
+- **MS2000 Flash Tool** (Windows, in the release zip): reads the complete 1 MB flash of your own MS2000 / MS2000R over
+  MIDI - the `flash.bin` this emulator needs - with unknown-technologies' flash dump, installed through the unit's own
+  update mode from KORG's v1.07 updater file. **Never with an MS2000B / MS2000BR.** See
+  [source/tools/flashdump/README.md](source/tools/flashdump/README.md) and [docs/ipl_protocol.md](docs/ipl_protocol.md).
 - Audio In 1/2 (vocoder, OSC1 AUDIO IN) through a model of the input stage and the AK4522 codec.
 - .syx: load a bank or program file into the machine and save all 128 programs as .syx (standalone: the buttons
   under the panel; plugin: Settings). The file goes into the emulated MIDI IN and the firmware itself stores it,

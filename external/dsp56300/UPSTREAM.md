@@ -5,6 +5,6 @@ gearmulator project), GPL-3.0 - see `LICENSE.md` in this folder.
 
 - Upstream commit: `d6e4514727366d70c4c645cd904256783ad65c8d`
 - asmjit (https://github.com/dsp56300/asmjit): `3577608cab0bc509f856ebf6e41b2f9d9f71acc4`
-- Changes for the MS2000: the patch series in `../../patches/dsp56300/` (0001-0009), already applied here.
+- Changes for the MS2000: the patch series in `../../patches/dsp56300/` (0001-0013), already applied here.
 - Left out: `source/wxWidgets` (only needed for the optional debugger, `DSP56300_DEBUGGER=OFF`) and the
   1.7 MB asmjit assembler test source.

@@ -245,6 +245,20 @@ int main(int argc, char** argv)
         std::cout << "power cycle took " << (juce::Time::getMillisecondCounterHiRes() - r0) << " ms; after: " << flashOf(stateOf(*inst)) << "\n";
         noteOn = at + int(5.0 * rate); noteOff = noteOn + int(3.0 * rate);
         play(*inst, out, at, total, block, noteOn, noteOff, midiOutEvents);
+    } else if (mode == "auto") {   // AUTOMATION-1: the host parameters; Filter Cutoff swept 0.05 -> 0.95 over 4.5..6.5 s
+        inst->prepareToPlay(rate, block);
+        const auto& ps = inst->getParameters();
+        juce::AudioProcessorParameter* cut = nullptr;
+        for (auto* p : ps) if (p->getName(64) == "Filter Cutoff") cut = p;
+        std::cout << "parameters: " << ps.size() << (cut ? "  (Filter Cutoff found)" : "  (NO Filter Cutoff)") << "\n";
+        for (int i = 0; i < ps.size(); i += 12) std::cout << "  #" << i << " " << ps[i]->getName(64) << " = " << ps[i]->getValue() << "\n";
+        if (!cut) return 8;
+        const int a = int(4.5 * rate), b = int(6.5 * rate);
+        for (int pos = 0; pos < total; pos += block) {
+            if (pos >= a && pos <= b) cut->setValue(0.05f + 0.9f * float(pos - a) / float(b - a));
+            play(*inst, out, pos, juce::jmin(total, pos + block), block, noteOn, noteOff, midiOutEvents);
+        }
+        std::cout << "cutoff param at the end: " << cut->getValue() << ", MIDI OUT events: " << midiOutEvents << "\n";
     } else if (mode == "editor") {
         inst->prepareToPlay(rate, block);
         std::unique_ptr<juce::AudioProcessorEditor> ed(inst->createEditorIfNeeded());

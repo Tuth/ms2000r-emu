@@ -9,6 +9,9 @@
 #include <mutex>
 #include "core/ms2000_runner.h"
 #include "core/syx_tool.h"
+#include "panel_params.h"
+#include "core/master_vr.h"
+#include <array>
 
 class Ms2kProcessor : public juce::AudioProcessor, private juce::Timer
 {
@@ -54,6 +57,7 @@ public:
     std::atomic<bool> knobFollow{ false };               // KNOB-FOLLOW: the pots show the program (off = where you left them)
     std::atomic<bool> sysexOut{ true };                  // VSTHOST-SYSEX-1: hand the firmware's SysEx OUT to the host
     std::atomic<bool> powerSwitch{ true };               // PWR-SW-1: the Master VR's switch - POWER off at the minimum
+    std::atomic<int> boostDb{ 0 };                       // OUT-BOOST-1: master output boost after the pot, 0..12 dB
     std::atomic<bool> transportMsgs{ true };             // MIDI-CLOCK b: Start (on a quarter) / Stop with the host transport
     juce::String libraryPath;                            // LIBRARY-1: the .syx the Library page shows
     void setKnob(unsigned mux, unsigned x, uint16_t v);
@@ -65,13 +69,8 @@ public:
     // 22k (at audio frequencies the 10uF is a short), so the divider is loaded:
     //   g(x) = x*RL / (RL + x*(1-x)*R),  R = 10k, RL = 22k:  g(1) = 1, g(0.5) = -6.96 dB, g(0.25) = -12.75 dB.
     // PWR-SW-1: its switch section (PSW1/PSW2) breaks the power at the minimum - see powerSwitchPoll().
-    static float masterVrGain(float x)
-    {
-        constexpr double R = 10.0e3, RL = 22.0e3;
-        const double p = x < 0.0f ? 0.0 : x > 1.0f ? 1.0 : double(x);
-        return float(p * RL / (RL + p * (1.0 - p) * R));
-    }
-    void applyVolume() { m_gain.store(masterVrGain(volume), std::memory_order_relaxed); }
+    static float masterVrGain(float x) { return ms2kMasterVrGain(x); }   // core/master_vr.h (shared with the standalone)
+    void applyVolume() { m_gain.store(masterVrGain(volume) * ms2kBoostGain(boostDb.load()), std::memory_order_relaxed); }
     MS2000::SyxTool& syx() { return m_syx; }
     // SETTINGS-1: the Settings page's switches are also the user's defaults for every NEW instance
     // (%APPDATA%\MS2000R\MS2000R.settings). A project's own state still overrides them when it is loaded.
@@ -79,6 +78,13 @@ public:
     void saveGlobalSettings() const;
     bool chooseHome(const juce::File& dir);     // HOME-1: Settings' folder choice
     juce::String homePath() const { return m_home.getFullPathName(); }
+    // AUTOMATION-1 (panel_params.h): the editor reports what the hand did; the parameter follows it, inside a host
+    // gesture that endUserEdits() closes (mouse up). Nothing else moves a parameter.
+    void userKnob(unsigned mux, unsigned x, uint16_t v);
+    void userKey(unsigned col, unsigned row, bool down);
+    void userVolume();
+    void userInputs();                       // in1, in2, mic2
+    void endUserEdits();
     bool poweredOff() const { return m_poweredOff; }   // PWR-SW-1: switched off by the Master VR (message thread)   // SYX-1: .syx import / program export through the machine's MIDI
 
 private:
@@ -111,6 +117,16 @@ private:
     void powerSwitchPoll();                  // message thread (timer)
     bool m_poweredOff = false;
     bool m_swHeld[8][8] = {};                // what the panel holds down - set again into a fresh machine
+    // AUTOMATION-1
+    std::array<juce::RangedAudioParameter*, ms2kparams::kCount> m_params{};
+    std::array<std::atomic<float>, ms2kparams::kCount> m_applied{};   // the value the panel has from each parameter
+    std::array<bool, ms2kparams::kCount> m_gesture{};
+    bool m_anyGesture = false;
+    int m_knobParam[4][8], m_keyParam[8][8];
+    float panelValue(int i) const;           // the panel's control i, 0..1
+    void syncParams();                       // parameters := the panel (construction, project load)
+    void pollParams(bool live);              // audio thread: a changed parameter moves its control
+    void userParam(int i, float v);
     void setStatus(const juce::String& s) { std::lock_guard<std::mutex> l(m_statusMx); m_status = s; }
 
     std::unique_ptr<MS2000::Ms2kRunner> m_runner;

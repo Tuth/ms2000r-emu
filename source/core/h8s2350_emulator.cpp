@@ -5272,8 +5272,21 @@ void H8S2350Emulator::writeIORegisterStruct(uint32_t address, uint8_t value)
             // and the next MIDI byte could only be an overrun. Its ERI1 handler (0x002444) writes
             // SSR & 0x87 to clear ORER/FER/PER - dropped too.
             const uint16_t clearable = 0xF8;                            // bits 7-3
+            const bool tdreWas = (m_sci[1].SSR & 0x80) != 0;
             m_sci[1].SSR &= uint16_t(~(clearable & ~uint16_t(value)));
             if ((m_sci[1].SCR & 0x20) == 0) m_sci[1].SSR |= 0x80;       // TE = 0: TDRE fixed at 1 (p.592)
+            // FLASHDUMP-1 (2026-10-08): TDRE cleared by a write, not by a TDR write. The SCI starts a transmission
+            // whenever it finds TDRE = 0 (async transmit: "write data to TDR and clear TDRE to 0"; the TDR -> TSR
+            // transfer happens when TDRE is 0) - so it sends what TDR holds, and TDRE/TEND come back after the
+            // character. Our TDR write already starts the character (and clears TDRE), so the firmware's usual
+            // "write TDR, BCLR #7" finds TDRE = 0 here and sends nothing twice. The IPL's init (0x407214:
+            // SSR1 &= 0x07) is such a bare clear: without this TDRE stayed 0 forever and the IPL never answered.
+            if (tdreWas && !(m_sci[1].SSR & 0x80) && (m_sci[1].SCR & 0x20) && !m_sci1_tx_active) {
+                { std::lock_guard<std::mutex> l(m_midiOutMx); if (m_midiOutSink) { if (m_dsp) m_dsp->syncMcu(); m_midiOutSink(uint8_t(m_sci[1].TDR)); } }
+                m_sci[1].SSR &= uint16_t(~0x04);                        // TEND = 0 while it shifts out
+                m_sci1_tx_busy_cycles = sci1CharCycles();
+                m_sci1_tx_active = true;
+            }
             if (!(m_sci[1].SSR & 0x80)) irqClear(86);                   // TXI1 follows TDRE
             if (!(m_sci[1].SSR & 0x40)) irqClear(85);                   // RXI1 follows RDRF
             if (!(m_sci[1].SSR & 0x38)) irqClear(84);                   // ERI1 follows ORER/FER/PER

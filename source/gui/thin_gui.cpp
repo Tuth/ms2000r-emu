@@ -14,6 +14,8 @@
 
 #include "thin_gui.h"
 #include "../core/ms2000_runner.h"
+#include "../core/master_vr.h"
+#include <functional>
 #include "../core/h8s2350_emulator.h"
 #include "../core/dsp56362_emulator.h"
 #include "../core/lcd_gui.h"
@@ -187,6 +189,8 @@ void saveBackBuffer(const char* path)
 
 struct Settings {
     std::string audio, midi, midiOut; float volume = 0.7f;
+    bool powerSwitch = true;                          // PWR-SW-1: the VOLUME pot's switch - off at the minimum
+    int boostDb = 0;                                  // OUT-BOOST-1: master output boost after the VOLUME pot, 0..12 dB
     bool vectorPanel = true;                          // VECTOR-PANEL: the MS2000R panel drawing (false = the test panel)
     bool knobFollow = false;                          // KNOB-FOLLOW: the pots show the program being edited
     // AIN-SOURCES: what feeds each MS2000 input jack - a capture endpoint and one of its channels
@@ -206,7 +210,7 @@ Settings loadSettings()
     while (std::getline(f, line)) {
         const auto eq = line.find('='); if (eq == std::string::npos) continue;
         const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-        if (k == "audio") s.audio = v; else if (k == "midi") s.midi = v; else if (k == "midi_out") s.midiOut = v; else if (k == "vector_panel") s.vectorPanel = v != "0"; else if (k == "knob_follow") s.knobFollow = v == "1"; else if (k == "volume") s.volume = float(atof(v.c_str()));
+        if (k == "power_switch") s.powerSwitch = v != "0"; else if (k == "boost_db") s.boostDb = std::clamp(std::atoi(v.c_str()), 0, 12); else if (k == "audio") s.audio = v; else if (k == "midi") s.midi = v; else if (k == "midi_out") s.midiOut = v; else if (k == "vector_panel") s.vectorPanel = v != "0"; else if (k == "knob_follow") s.knobFollow = v == "1"; else if (k == "volume") s.volume = float(atof(v.c_str()));
         else if (k == "audio_in") { if (!v.empty()) { s.in[0] = { v, 0 }; s.in[1] = { v, 1 }; } }   // old single setting: L -> IN1, R -> IN2
         else if (k == "in1_src" || k == "in2_src") {
             Settings::InSrc& d = s.in[k == "in2_src" ? 1 : 0]; const auto bar = v.rfind('|');
@@ -223,7 +227,7 @@ Settings loadSettings()
 void saveSettings(const Settings& s)
 {
     std::ofstream f("thin_gui.ini");
-    f << "audio=" << s.audio << "\nmidi=" << s.midi << "\nmidi_out=" << s.midiOut << "\nvector_panel=" << (s.vectorPanel ? 1 : 0) << "\nknob_follow=" << (s.knobFollow ? 1 : 0) << "\nvolume=" << s.volume << "\n"
+    f << "power_switch=" << (s.powerSwitch ? 1 : 0) << "\nboost_db=" << s.boostDb << "\naudio=" << s.audio << "\nmidi=" << s.midi << "\nmidi_out=" << s.midiOut << "\nvector_panel=" << (s.vectorPanel ? 1 : 0) << "\nknob_follow=" << (s.knobFollow ? 1 : 0) << "\nvolume=" << s.volume << "\n"
       << "in1_src=" << s.in[0].dev << "|" << s.in[0].ch << "\nin2_src=" << s.in[1].dev << "|" << s.in[1].ch
       << "\nin1_level=" << s.vr30 << "\nin2_level=" << s.vr31
       << "\nin2_mic=" << (s.mic2 ? 1 : 0) << "\ndac20=" << (s.dac20 ? 1 : 0) << "\n";
@@ -233,9 +237,17 @@ void saveSettings(const Settings& s)
 }
 } // namespace
 
-int run_thin_gui(MS2000::Ms2kRunner& runner)
+int run_thin_gui(MS2000::Ms2kRunner& runner, std::function<std::unique_ptr<MS2000::Ms2kRunner>()> makeRunner)
 {
     using namespace MS2000;
+    // PWR-SW-1 (standalone, 2026-10-08): the VOLUME pot's switch section turns the machine off at the minimum and a
+    // power-on boots a NEW machine (makeRunner), as the plugin does - flash state kept by the runner's stop()/init().
+    // R = the running machine, nullptr while switched off.
+    MS2000::Ms2kRunner* R = &runner;
+    std::unique_ptr<MS2000::Ms2kRunner> owned;
+    bool off = false;
+    static VPanel::IO vio;                                // the vector panel's state (held keys survive a power cycle)
+    static bool swHeld[7][8] = {};                        // the test panel's held keys
     // An emulator is a real-time load: opt out of Windows' execution-speed throttling (EcoQoS),
     // which is applied to windows that are not in the foreground, and ask for 1 ms timer
     // granularity so the audio-paced 1 ms waits are 1 ms.
@@ -274,9 +286,10 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
     const CgRom rom = loadCgRom();
     Settings st = loadSettings();
 
-    DSP56362Emulator* dsp = runner.getEmulator().dsp();
+    DSP56362Emulator* dsp = R->getEmulator().dsp();
     if (dsp) dsp->enableAudioRing(true);
-    std::atomic<float> gain{ st.volume };
+    auto outGain = [&st] { return ms2kMasterVrGain(st.volume) * ms2kBoostGain(st.boostDb); };   // MVR-1 pot, OUT-BOOST-1
+    std::atomic<float> gain{ outGain() };
     std::atomic<bool>  primed{ false };
 
     // WAV RECORDER (2026-09-25, GUI-3). What the DSP put on TX0 slot 0/1 - the same 24-bit
@@ -342,12 +355,13 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
     };
     static MidiOutClock moc;
     static MS2000::SyxTool syx;   // SYX-1: .syx import / program export through the machine's own MIDI
-    syx.setSend([&runner](const uint8_t* p, size_t n) { runner.sendMIDIData(p, n); });
-    runner.getEmulator().setMidiOutSink([&midiOut, dsp](uint8_t b) {
+    syx.setSend([&R](const uint8_t* p, size_t n) { R->sendMIDIData(p, n); });
+    auto setSink = [&]() { R->getEmulator().setMidiOutSink([&midiOut, dsp](uint8_t b) {
         syx.feed(b);
         if (dsp && moc.on.load(std::memory_order_acquire)) { LARGE_INTEGER t; QueryPerformanceCounter(&t); std::lock_guard<std::mutex> l(moc.mx); moc.q.push_back({ dsp->txFrames(), b, t.QuadPart }); }
         else midiOut.byte(b);
-    });
+    }); };
+    setSink();
     moc.th = std::thread([&midiOut] {
         LARGE_INTEGER f; QueryPerformanceFrequency(&f);
         std::vector<uint8_t> out;
@@ -381,8 +395,8 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
 
     auto openAudio = [&]() {
         audio.close();
-        runner.setAudioPaced(false);
-        if (audioSel < 0 || !dsp) return;
+        if (R) R->setAudioPaced(false);
+        if (audioSel < 0 || !dsp || !R) return;
         { int32_t l, r; while (dsp->popAudio(l, r)) {} }             // start from an empty ring
         primed = false;
         audio.open(audioDevs[audioSel].id, [dsp, &gain, &primed](float* lr, uint32_t frames) -> uint32_t {
@@ -399,7 +413,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
             if (!primed) { for (uint32_t i = 0; i < 2 * frames; ++i) lr[i] = 0.0f; return frames; }
             return n;
         });
-        runner.setAudioPaced(true, 2400);                             // 50 ms of emulated audio ahead
+        R->setAudioPaced(true, 2400);                             // 50 ms of emulated audio ahead
         st.audio = audioDevs[audioSel].name;
     };
     // AUDIO-IN / AIN-SOURCES: each MS2000 input jack takes one channel of a capture endpoint (the UMC1820
@@ -443,14 +457,43 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
     auto openMidi = [&]() {
         midi.close();
         if (midiSel < 0) { st.midi.clear(); return; }
-        midi.open(unsigned(midiSel), [&runner](const uint8_t* d, size_t n) { runner.sendMIDIData(d, n); });
         st.midi = midiDevs[midiSel];
+        if (!R) return;                                   // switched off: opened again at the power-on
+        midi.open(unsigned(midiSel), [&R](const uint8_t* d, size_t n) { if (R) R->sendMIDIData(d, n); });
+    };
+    // PWR-SW-1: a fresh machine gets the panel as it stands (pots, input stage, DAC, held keys) before it runs
+    auto wireMachine = [&]() {
+        dsp = R->getEmulator().dsp();
+        if (dsp) { dsp->enableAudioRing(true); dsp->setInputStage(st.vr30, st.vr31, st.mic2); dsp->setDac20(st.dac20); }
+        setSink();
+        for (unsigned m = 0; m < 4; ++m) for (unsigned x = 0; x < 8; ++x) R->getEmulator().setPanelKnob(m, x, st.knob[m][x]);
+        for (unsigned c = 0; c < 7; ++c) for (unsigned r = 0; r < 8; ++r)
+            if (vio.swHeld[c][r] || swHeld[c][r]) R->getEmulator().setPanelSwitch(c, r, true);
+    };
+    auto powerOff = [&]() {
+        midi.close(); audio.close(); ain[0].close(); ain[1].close();
+        if (R) { R->setAudioPaced(false); R->getEmulator().setMidiOutSink(nullptr); R->stop(); }
+        R = nullptr; owned.reset(); dsp = nullptr; off = true; primed = false;
+        printf("[THIN-GUI] POWER off (VOLUME at its minimum)\n"); fflush(stdout);
+    };
+    auto powerOn = [&]() {
+        static ULONGLONG lastTry = 0;
+        if (GetTickCount64() - lastTry < 2000) return;
+        lastTry = GetTickCount64();
+        owned = makeRunner ? makeRunner() : nullptr;
+        if (!owned) { printf("[THIN-GUI] power on FAILED (machine did not init)\n"); fflush(stdout); return; }
+        R = owned.get(); off = false;
+        wireMachine();
+        R->start();
+        openAudio(); openAudioIn(); openMidi();
+        printf("[THIN-GUI] POWER on - cold boot\n"); fflush(stdout);
     };
 
     // PANEL-IO: the pots stand where they stood before the firmware first reads them.
-    for (unsigned m = 0; m < 4; ++m) for (unsigned x = 0; x < 8; ++x) runner.getEmulator().setPanelKnob(m, x, st.knob[m][x]);
+    for (unsigned m = 0; m < 4; ++m) for (unsigned x = 0; x < 8; ++x) R->getEmulator().setPanelKnob(m, x, st.knob[m][x]);
     openMidiOut();
-    runner.start();
+    if (st.powerSwitch && ms2kPowerSwitchOpen(st.volume)) { R = nullptr; dsp = nullptr; off = true; }   // switched off: no boot
+    else R->start();
     openAudio();
     openAudioIn();
     openMidi();
@@ -465,6 +508,10 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         MSG msg;
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessage(&msg); if (msg.message == WM_QUIT) done = true; }
         if (done) break;
+        {   // PWR-SW-1: the VOLUME pot's switch section
+            const bool open = st.powerSwitch && ms2kPowerSwitchOpen(st.volume);
+            if (open && !off) powerOff(); else if (!open && off) powerOn();
+        }
 
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -477,7 +524,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
             const ULONGLONG now = GetTickCount64();
             moc.on.store(audio.isOpen() && !audio.dead() && primed.load(), std::memory_order_release);   // MIDI-OUT-TIMING
             if (audio.dead()) {
-                if (runner.isAudioPaced()) runner.setAudioPaced(false);
+                if (R && R->isAudioPaced()) R->setAudioPaced(false);
                 if (now - lastOut >= 2000) { lastOut = now; printf("[THIN-GUI] audio out ended (%s) - reopening\n", audio.lastError().c_str()); fflush(stdout); openAudio(); }
             }
             if ((ain[0].dead() || ain[1].dead()) && now - lastIn >= 2000) {
@@ -522,11 +569,17 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         }
 
         ImGui::Spacing();
-        if (!st.vectorPanel) { drawLcd(runner.getLcdGuiSnapshot(), rom, 5.0f); ImGui::Spacing(); }
+        if (!st.vectorPanel) { drawLcd(R ? R->getLcdGuiSnapshot() : LcdGuiSnapshot{}, rom, 5.0f); ImGui::Spacing(); }
 
-        float vol = gain.load();
+        float vol = st.volume;
         ImGui::SetNextItemWidth(200);
-        if (ImGui::SliderFloat("Host volume", &vol, 0.0f, 1.0f, "%.2f")) { gain = vol; st.volume = vol; }
+        if (ImGui::SliderFloat("VOLUME", &vol, 0.0f, 1.0f, "%.2f")) { st.volume = vol; gain = outGain(); }
+        ImGui::SameLine(); ImGui::SetNextItemWidth(130);
+        if (ImGui::SliderInt("Output boost", &st.boostDb, 0, 12, "+%d dB")) gain = outGain();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Master output boost after the VOLUME pot, 1 dB steps (above 0 dB full scale the output clips)");
+        ImGui::SameLine(); ImGui::Checkbox("POWER switch", &st.powerSwitch);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The VOLUME pot's switch: at the minimum the machine is off, as on the unit");
+        if (off) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "POWER OFF - turn VOLUME up"); }
 
         // AUDIO-IN row: capture device, the two input level knobs, SW1, the DAC option, ADC clip counts.
         bool stageChanged = false;
@@ -565,15 +618,15 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         if (held != testNote) {
             testNote = held;
             const uint8_t m[3] = { uint8_t(held ? 0x90 : 0x80), 0x3C, 0x64 };
-            runner.sendMIDIData(m, 3);
+            if (R) R->sendMIDIData(m, 3);
         }
 
         // PANEL (2026-09-27, PANEL-IO): the MS2000R front panel, section by section (owner's manual p.5), wired
         // to the three circuits of the service manual - switches KOD-A30414 (SS column, T row), knobs KOD-A30415
         // (HC4051 IC1..IC4 = AN4..AN7, input X0..X7) and LEDs KOD-A30416 (row LSn, column LDm). Buttons are
         // momentary while the mouse holds them. Knobs: drag up/down (Shift = fine), wheel, double-click = centre.
-        H8S2350Emulator& cpu = runner.getEmulator();
-        const H8S2350Emulator::PanelLeds leds = cpu.panelLeds();
+        H8S2350Emulator* cpu = R ? &R->getEmulator() : nullptr;   // PWR-SW-1: nullptr while switched off
+        const H8S2350Emulator::PanelLeds leds = cpu ? cpu->panelLeds() : H8S2350Emulator::PanelLeds{};
         {   // MS2K_GUILEDLOG=1 (R2 diagnostic, default off): once a second, the LEDs exactly as this frame draws them.
             static const bool on = getenv("MS2K_GUILEDLOG") != nullptr; static ULONGLONG last = 0;
             if (on && GetTickCount64() - last >= 1000) {
@@ -584,11 +637,10 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
                 printf("\n"); fflush(stdout);
             }
         }
-        static bool swHeld[7][8] = {};
         auto sw = [&](const char* label, unsigned col, unsigned row, float w = 0) {
             ImGui::Button(label, ImVec2(w, 0));
             const bool h = ImGui::IsItemActive();
-            if (h != swHeld[col][row] && demoPhase == 0) { swHeld[col][row] = h; cpu.setPanelSwitch(col, row, h); }
+            if (h != swHeld[col][row] && demoPhase == 0) { swHeld[col][row] = h; if (cpu) cpu->setPanelSwitch(col, row, h); }
         };
         auto ledColor = [&](float r, float g) {
             r = (std::min)(1.0f, r * 1.15f); g = (std::min)(1.0f, g * 1.15f);
@@ -622,7 +674,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
             if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f) nv += int(io.MouseWheel * (io.KeyShift ? 1.0f : 16.0f));
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) nv = 512;
             nv = nv < 0 ? 0 : nv > 1023 ? 1023 : nv;
-            if (nv != v) { v = uint16_t(nv); cpu.setPanelKnob(mux, x, v); }
+            if (nv != v) { v = uint16_t(nv); if (cpu) cpu->setPanelKnob(mux, x, v); }
             const char* le = strstr(label, "##"); if (!le) le = label + strlen(label);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%.*s  %u / 1023  (AN%u X%u)", int(le - label), label, unsigned(v), mux + 4, x);
             ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -643,17 +695,16 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
 
         ImGui::SameLine();
         ImGui::Checkbox("Vector panel", &st.vectorPanel);
-        if (st.vectorPanel) { ImGui::SameLine(); ImGui::Checkbox("Knobs show the program", &st.knobFollow); ImGui::SameLine(); ImGui::TextDisabled("(Shift+click a pad 1-16 or EXIT: it stays held)"); }
+        if (st.vectorPanel) { ImGui::SameLine(); ImGui::Checkbox("Knobs show the program", &st.knobFollow); ImGui::SameLine(); ImGui::TextDisabled("(Shift+click a key: it stays held)"); }
         if (st.vectorPanel) {
             // VECTOR-PANEL (vector_panel.h): the MS2000R front panel, fitted to the window below this line.
-            static VPanel::IO vio;
             vio.lit = leds.lit; vio.shown = shown; vio.knobs = st.knob;
             // KNOB-FOLLOW (knob_follow.h): drawn from the edit buffer; a pot being turned keeps the mouse's value
             // until 300 ms after its last move; turning a pot always moves the physical pot (st.knob).
             static uint16_t disp[4][8]; static int lastMoved = -1; static ULONGLONG lastMs = 0;
-            if (st.knobFollow) {
+            if (st.knobFollow && cpu) {
                 uint8_t prog[254];
-                for (int i = 0; i < 254; ++i) prog[i] = cpu.peekExternal(MS2000::kEditBufferAddr + uint32_t(i));
+                for (int i = 0; i < 254; ++i) prog[i] = cpu->peekExternal(MS2000::kEditBufferAddr + uint32_t(i));
                 uint16_t want[4][8]; bool fol[4][8];
                 MS2000::programKnobs(prog, leds.lit[5][2] > 0.5f ? 1 : 0, want, fol);
                 const bool held = ImGui::IsMouseDown(0) || GetTickCount64() - lastMs < 300;
@@ -662,9 +713,9 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
                 vio.knobs = disp;
             }
             vio.volume = &st.volume; vio.in1 = &st.vr30; vio.in2 = &st.vr31;
-            vio.sw = [&cpu, &demoPhase](unsigned c, unsigned r, bool d) { if (demoPhase == 0) cpu.setPanelSwitch(c, r, d); };
-            vio.knob = [&cpu, &st](unsigned m, unsigned x, uint16_t v) { st.knob[m][x] = v; cpu.setPanelKnob(m, x, v); lastMoved = int(m * 8 + x); lastMs = GetTickCount64(); };
-            const LcdGuiSnapshot lcdSnap = runner.getLcdGuiSnapshot();
+            vio.sw = [&cpu, &demoPhase](unsigned c, unsigned r, bool d) { if (demoPhase == 0) if (cpu) cpu->setPanelSwitch(c, r, d); };
+            vio.knob = [&cpu, &st](unsigned m, unsigned x, uint16_t v) { st.knob[m][x] = v; if (cpu) cpu->setPanelKnob(m, x, v); lastMoved = int(m * 8 + x); lastMs = GetTickCount64(); };
+            const LcdGuiSnapshot lcdSnap = R ? R->getLcdGuiSnapshot() : LcdGuiSnapshot{};
             VPanel::ImGuiBackend vbe;
             vbe.dl = ImGui::GetWindowDrawList(); vbe.f = panelFont ? panelFont : ImGui::GetFont();
             vbe.lcdFn = [&lcdSnap, &rom](ImVec2 a, ImVec2 b) { drawLcdPanel(lcdSnap, rom, a, b); };
@@ -675,7 +726,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
             const float sc = (std::min)(avail.x / VPanel::kW, avail.y / VPanel::kH);
             ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + VPanel::kH * sc + 6.0f));
             ImGui::Dummy(ImVec2(VPanel::kW * sc, 1.0f));
-            if (vio.volumeChanged) gain = st.volume;
+            if (vio.volumeChanged) gain = outGain();
             if (vio.stageChanged && dsp) dsp->setInputStage(st.vr30, st.vr31, st.mic2);
         } else {
         ImGui::Separator();
@@ -829,9 +880,9 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         if (demoAt > 0 && GetTickCount64() >= demoAt && demoPhase == 0) { demoAt = 0; demoPhase = 1; demoT0 = GetTickCount64(); }
         if (demoPhase) {
             const ULONGLONG dt = GetTickCount64() - demoT0;
-            if (demoPhase == 1) { cpu.setPanelSwitch(4, 0, true); demoPhase = 2; }                        // EXIT down
-            else if (demoPhase == 2 && dt >= 200) { cpu.setPanelSwitch(3, 6, true); demoPhase = 3; }       // GLOBAL down
-            else if (demoPhase == 3 && dt >= 1400) { cpu.setPanelSwitch(3, 6, false); cpu.setPanelSwitch(4, 0, false); demoPhase = 0; }
+            if (demoPhase == 1) { if (cpu) cpu->setPanelSwitch(4, 0, true); demoPhase = 2; }                        // EXIT down
+            else if (demoPhase == 2 && dt >= 200) { if (cpu) cpu->setPanelSwitch(3, 6, true); demoPhase = 3; }       // GLOBAL down
+            else if (demoPhase == 3 && dt >= 1400) { if (cpu) cpu->setPanelSwitch(3, 6, false); if (cpu) cpu->setPanelSwitch(4, 0, false); demoPhase = 0; }
             ImGui::SameLine(); ImGui::TextDisabled(demoPhase == 2 ? "EXIT held" : demoPhase == 3 ? "EXIT + GLOBAL held" : "");
         }
 
@@ -860,7 +911,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
         ImGui::Text("Audio device: %s%s   MIDI in bytes: %llu   pacing: %s",
                     audio.isOpen() ? "open" : "closed",
                     audio.deviceRate() ? (" (" + std::to_string(audio.deviceRate()) + " Hz mix)").c_str() : "",
-                    (unsigned long long)midi.bytesIn(), runner.isAudioPaced() ? "audio clock" : "wall clock");
+                    (unsigned long long)midi.bytesIn(), (R && R->isAudioPaced()) ? "audio clock" : "wall clock");
         const std::string err = audio.lastError();
         if (!err.empty()) ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Audio: %s", err.c_str());
         if (!rom.ok) ImGui::TextDisabled("hd44780_a00.bin not found - LCD drawn as text");
@@ -876,14 +927,13 @@ int run_thin_gui(MS2000::Ms2kRunner& runner)
     }
 
     saveSettings(st);
-    runner.getEmulator().setMidiOutSink(nullptr);
+    if (R) R->getEmulator().setMidiOutSink(nullptr);
     moc.stop = true; if (moc.th.joinable()) moc.th.join();
     midi.close();
     ain[0].close(); ain[1].close();
     audio.close();
     rec.stop();                                                        // finish the WAV header on exit
-    runner.setAudioPaced(false);
-    runner.stop();
+    if (R) { R->setAudioPaced(false); R->stop(); }
 
     timeEndPeriod(1);
     ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();

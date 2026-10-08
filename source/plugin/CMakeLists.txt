@@ -31,6 +31,23 @@ target_compile_definitions(MS2000R_HostTest PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_
 target_link_libraries(MS2000R_HostTest PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags)
 
+# FLASHDUMP-1 (2026-10-08): MS2000 Flash Tool - installs unknown-technologies' flash-dump update and reads the 1 MB
+# flash of a real MS2000 / MS2000R over MIDI (source/tools/flashdump, protocol in ms2k_ipl, tested by ipl_e2e).
+juce_add_gui_app(MS2000FlashTool PRODUCT_NAME "MS2000 Flash Tool" COMPANY_NAME "MS2000 emulation project")
+juce_generate_juce_header(MS2000FlashTool)
+target_sources(MS2000FlashTool PRIVATE ${CMAKE_SOURCE_DIR}/source/tools/flashdump/FlashToolApp.cpp)
+target_include_directories(MS2000FlashTool PRIVATE ${CMAKE_SOURCE_DIR}/source)
+target_compile_definitions(MS2000FlashTool PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_DISPLAY_SPLASH_SCREEN=0)
+target_link_libraries(MS2000FlashTool PRIVATE ms2k_ipl juce::juce_gui_basics juce::juce_audio_devices
+    PUBLIC juce::juce_recommended_config_flags)
+# ... and the emulated MS2000R on two MIDI ports, to try the tool without a real unit (loopMIDI)
+juce_add_console_app(MS2000IplBridge PRODUCT_NAME "MS2000IplBridge")
+juce_generate_juce_header(MS2000IplBridge)
+target_sources(MS2000IplBridge PRIVATE ${CMAKE_SOURCE_DIR}/source/tools/flashdump/IplBridge.cpp)
+target_include_directories(MS2000IplBridge PRIVATE ${CMAKE_SOURCE_DIR}/source)
+target_compile_definitions(MS2000IplBridge PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(MS2000IplBridge PRIVATE ms2000 juce::juce_audio_devices PUBLIC juce::juce_recommended_config_flags)
+
 # MULTI-1 (2026-10-02): several instances per process. The host loads this small VST3 module; the JUCE plugin above
 # travels in the bundle as Contents/Resources/MS2000R_engine.dll and every instance after the first runs from its
 # own copy of it (see shim/ms2k_vst3_shim.cpp). Result: build_vst/VST3_multi/MS2000R.vst3
