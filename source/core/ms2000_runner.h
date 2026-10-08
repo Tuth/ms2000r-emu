@@ -101,6 +101,11 @@ struct Ms2kConfig {
     // flashStateImage (FLASH_SIZE bytes) instead of the file. MS2K_FLASHSTATE=off still overrides all of it.
     bool        dspThread = false;          // DSP-THREAD: render() mode runs the DSP on its own thread
     bool        flashStateLoad = true;      // take ms2000_flash_state.bin/.sectors at init
+    // DEV-FLASH-1 (developer builds only, MS2K_DEV_FLASH): the WHOLE flash chip as one file, named after
+    // the part (MBM29LV800BA, IC10 on KOD-A30411). Non-empty = on: the image is loaded instead of romPath
+    // (made from romPath the first time), every firmware erase/program is written back to it, and the
+    // state files / project sectors are not used. romPath (flash.bin, the sacred dump) is never written.
+    std::string devFlashPath;
     bool        flashStateSave = true;      // write them at stop
     uint32_t    flashStateMask = 0;
     std::vector<uint8_t> flashStateImage;
@@ -303,6 +308,7 @@ public:
     std::unique_ptr<MS2000::H8S2350Emulator>   m_cpu;
 
     std::atomic<bool> m_running{false};
+    uint32_t m_devGen = 0, m_devTicks = 0;   // DEV-FLASH-1
     bool m_manual = false, m_lcdReportPrinted = false;   // ENGINE-BLOCK
     uint64_t m_renderSilence = 0;
     uint64_t m_renderFrames = 0;   // PERF-VST: frames render() has handed out

@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(KorgMS2000 VERSION 0.9.3 LANGUAGES CXX)
+project(KorgMS2000 VERSION 0.9.4 LANGUAGES CXX)
 add_compile_definitions(MS2K_VERSION="${PROJECT_VERSION}")   # PUBLIC-1b: shown in the GUI title and the plugin
 
 # Enable testing support for CTest
@@ -273,6 +273,11 @@ endif()
 
 # Build options
 option(MS2K_EMULATE_MCU "Emulate H8S/2350 MCU" ON)
+# DEV-FLASH-1: developer build - the flash is the whole chip image MBM29LV800BA.bin (local only, never in git)
+option(MS2K_DEV_FLASH "Developer build: read/write the full flash chip image MBM29LV800BA.bin" OFF)
+if(MS2K_DEV_FLASH)
+  add_compile_definitions(MS2K_DEV_FLASH=1)
+endif()
 option(MS2K_HOST_UI "Use host UI instead of MCU" OFF)
 option(MS2K_DEBUG "Enable debug output" OFF)
 

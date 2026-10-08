@@ -1331,6 +1331,7 @@ namespace dsp56k
 		sr_z_update(d);
 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == minimum);
 		sr_l_update_by_v();
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_S | CCR_E | CCR_U | CCR_N);
 	}
 
@@ -1366,6 +1367,7 @@ namespace dsp56k
 		sr_z_update(d);
 		sr_toggle(CCR_V, value == minimum);
 		sr_l_update_by_v();
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_S | CCR_E | CCR_U | CCR_N);
 	}
 

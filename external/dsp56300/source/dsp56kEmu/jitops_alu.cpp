@@ -106,6 +106,8 @@ namespace dsp56k
 
 		if(!m_disableCCRUpdates)
 			ccr_dirty(_ab, alu, static_cast<CCRMask>(CCR_E | CCR_N | CCR_U | CCR_Z));
+		else if(smSaturates())
+			alu_saturateSM(alu);	// IF form: no CCR update, the result still saturates (SM)
 	}
 
 	void JitOps::alu_add(const TWord _ab, const uint8_t _v)
@@ -174,6 +176,8 @@ namespace dsp56k
 
 		if(!m_disableCCRUpdates)
 			ccr_dirty(_ab, alu, static_cast<CCRMask>(CCR_E | CCR_N | CCR_U | CCR_Z));
+		else if(smSaturates())
+			alu_saturateSM(alu);	// IF form: no CCR update, the result still saturates (SM)
 	}
 
 	void JitOps::alu_sub(const TWord _ab, const uint8_t _v)

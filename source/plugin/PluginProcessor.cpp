@@ -29,7 +29,10 @@ std::atomic<int> g_liveProcessors{ 0 };   // MULTI-1: read by the loader module 
 
 bool validHome(const juce::File& d)
 {
-    return d.getChildFile("flash.bin").existsAsFile() && d.getChildFile("full FW").getChildFile("boot-362.ms2000.bin").existsAsFile();
+    // BOOTROM-1: the public boot-362.bin is enough - the emulator corrects its two words in memory
+    const auto fw = d.getChildFile("full FW");
+    return d.getChildFile("flash.bin").existsAsFile()
+        && (fw.getChildFile("boot-362.ms2000.bin").existsAsFile() || fw.getChildFile("boot-362.bin").existsAsFile());
 }
 // HOME-1 (2026-10-01): the folder picked in Settings, kept for every instance and project
 juce::File homeSetting() { return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("MS2000R").getChildFile("home.txt"); }
@@ -63,6 +66,7 @@ Ms2kProcessor::Ms2kProcessor()
 {
     ++g_liveProcessors;
     for (auto& m : knobs) for (auto& v : m) v = 512;     // every pot at its centre, as the standalone's default
+    loadGlobalSettings();                                // SETTINGS-1
     m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
     m_syx.setClock([this] { return double(m_frames.load(std::memory_order_relaxed)) / (m_hostRate > 0 ? m_hostRate : 48000.0); });   // machine time
     startTimerHz(10);
@@ -70,9 +74,47 @@ Ms2kProcessor::Ms2kProcessor()
 
 // SYX-1: the .syx tool runs on the message thread. R2 diagnostics (default OFF): MS2K_SYXIMPORT=<file> loads it
 // once the machine has played 5 s, then MS2K_SYXEXPORT=<file> saves all programs; results on stdout.
+// HOSTDIAG-1: diagnostics go to a FILE (%TEMP%\ms2k_hostdiag.log), never to OutputDebugString - that call
+// blocks until a debugger output viewer takes the line, and a stalled DebugView froze the host's message
+// thread inside our timer (measured: vsthost main thread in OutputDebugStringA -> WaitForSingleObject).
+static void ms2kDiagLog(const juce::String& line)
+{
+    static const juce::File f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("ms2k_hostdiag.log");
+    f.appendText(juce::Time::getCurrentTime().toString(false, true, true, true) + " " + line + "\n", false, false, "\n");
+}
+
 void Ms2kProcessor::timerCallback()
 {
     m_syx.poll();
+    powerSwitchPoll();
+    // HOSTDIAG-1 (R2, default off): MS2K_HOSTDIAG=1 -> once a second to the debugger output (DebugView): is the
+    // host still calling processBlock, does the machine advance, and does render() hand out silence. For the
+    // VSTHost-only freeze after Demo -> EXIT (2026-10-08): all threads idle-wait in the dump, no spinner.
+    if (static const bool diag = [] { const char* e = std::getenv("MS2K_HOSTDIAG"); return e && *e && *e != '0'; }();
+        diag && m_runner && ++m_hostDiagTick >= 10) {
+        m_hostDiagTick = 0;
+        auto& cpu = m_runner->getEmulator();   // read unsynchronised: a diagnostic, values may be a moment stale
+        ms2kDiagLog(juce::String::formatted("[MS2K-HOSTDIAG] blocks=%llu frames=%llu silence=%llu h8pc=%06X h8cyc=%llu",
+            (unsigned long long)m_blocks.load(), (unsigned long long)m_frames.load(),
+            (unsigned long long)m_runner->renderSilenceFrames(), unsigned(cpu.getProgramCounter()),
+            (unsigned long long)cpu.getCycles()));
+        juce::String rt;
+        for (int i = 0; i < 8; ++i) if (const auto c = m_diagRt[i].load()) rt << juce::String::toHexString(0xF8 + i).toUpperCase() << "x" << juce::String((juce::int64)c) << " ";
+        if (rt.isNotEmpty()) ms2kDiagLog("[MS2K-MIDIOUT] realtime totals: " + rt);
+        {   // FREEZE-PC hunt: the keys the panel holds down (a stuck key blocks the program pads) and the LCD
+            juce::String held;
+            for (unsigned c = 0; c < 8; ++c) for (unsigned r = 0; r < 8; ++r) if (m_swHeld[c][r]) held << int(c) << "," << int(r) << " ";
+            const LcdGuiSnapshot s = m_runner->getLcdGuiSnapshot();
+            ms2kDiagLog("[MS2K-PANEL] held=" + (held.isEmpty() ? juce::String("-") : held) + " lcd=\"" + juce::String(s.line0) + "|" + juce::String(s.line1) + "\"");
+        }
+        const uint32_t w = m_diagOutW.load(std::memory_order_acquire);
+        if (w - m_diagOutR > 256) m_diagOutR = w - 256;
+        for (int n = 0; m_diagOutR != w && n < 40; ++m_diagOutR, ++n) {
+            const auto& m = m_diagOut[m_diagOutR & 255];
+            juce::String h; for (int i = 0; i < m.len && i < 7; ++i) h << juce::String::toHexString(m.b[i]).paddedLeft('0', 2).toUpperCase() << " ";
+            ms2kDiagLog("[MS2K-MIDIOUT] blk=" + juce::String((juce::int64)m.blk) + " len=" + juce::String(int(m.len)) + " " + h);
+        }
+    }
     static const char* imp = std::getenv("MS2K_SYXIMPORT");
     static const char* exp = std::getenv("MS2K_SYXEXPORT");
     static const char* prg = std::getenv("MS2K_SYXPROGRAM");   // LIBRARY-1 diag: "<file>|<index>" after 5 s
@@ -124,6 +166,7 @@ void Ms2kProcessor::setKnob(unsigned mux, unsigned x, uint16_t v)
 
 void Ms2kProcessor::setSwitch(unsigned col, unsigned row, bool down)
 {
+    if (col < 8 && row < 8) m_swHeld[col][row] = down;
     if (m_runner) m_runner->getEmulator().setPanelSwitch(col, row, down);
 }
 
@@ -142,6 +185,39 @@ void Ms2kProcessor::applyPanel()
     if (!m_runner) return;
     for (unsigned m = 0; m < 4; ++m) for (unsigned x = 0; x < 8; ++x) m_runner->getEmulator().setPanelKnob(m, x, knobs[m][x]);
     applyInputStage(); applyDac(); applyVolume();
+    for (unsigned c = 0; c < 8; ++c) for (unsigned r = 0; r < 8; ++r)
+        if (m_swHeld[c][r]) m_runner->getEmulator().setPanelSwitch(c, r, true);
+}
+
+void Ms2kProcessor::clearStreams()
+{
+    m_srcL.clear(); m_srcR.clear(); m_interpL.reset(); m_interpR.reset();
+    m_outBytes.clear(); m_outStatus = 0; m_outHave = 0; m_outSysex = false; m_sysex.clear();
+    for (int ch = 0; ch < 2; ++ch) { m_inFifo[ch].clear(); m_inInterp[ch].reset(); }
+}
+
+// PWR-SW-1: the Master VR's switch. Off: the flash is kept (the project's state from now on, the chip image in a
+// DEV-FLASH build), the machine stops - dark LCD, silence. On: a cold boot from that flash, held keys down.
+void Ms2kProcessor::powerSwitchPoll()
+{
+    if (!m_owner) return;
+    const bool open = powerSwitchOpen();
+    if (open && m_runner && !m_poweredOff) {
+        std::lock_guard<std::mutex> l(m_machineMx);
+        const auto& f = m_runner->getEmulator().getFlashROM();
+        m_projectMask = f.stateMask();
+        m_projectImage.assign(f.data(), f.data() + f.size());
+        m_haveProjectFlash = true;
+        stopMachine();
+        clearStreams();
+        m_poweredOff = true;
+        setStatus("POWER off (Master VOLUME at its minimum)");
+    } else if (!open && m_poweredOff) {
+        std::lock_guard<std::mutex> l(m_machineMx);
+        m_poweredOff = false;
+        clearStreams();
+        startMachine();
+    }
 }
 
 bool Ms2kProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -158,18 +234,19 @@ bool Ms2kProcessor::bootMachine()
     m_owner = true;
     m_home = findHome();
     if (m_home == juce::File()) {
-        setStatus("The MS2000 folder (flash.bin + full FW\\boot-362.ms2000.bin) was not found - Settings: Choose the MS2000 folder.");
+        setStatus("The MS2000 folder (flash.bin + full FW\\boot-362.bin) was not found - Settings: Choose the MS2000 folder.");
         return false;
     }
     m_home.setAsCurrentWorkingDirectory();
     if (!std::getenv("MS2K_MODEL")) _putenv_s("MS2K_MODEL", "R");
+    if (powerSwitchOpen()) { m_poweredOff = true; setStatus("POWER off (Master VOLUME at its minimum)"); return true; }
     return startMachine();
 }
 
 // HOME-1: the folder chosen in Settings - saved for every instance; powers the machine on if it is not running yet
 bool Ms2kProcessor::chooseHome(const juce::File& d)
 {
-    if (!validHome(d)) { setStatus("No flash.bin + full FW\\boot-362.ms2000.bin in " + d.getFullPathName()); return false; }
+    if (!validHome(d)) { setStatus("No flash.bin + full FW\\boot-362.bin in " + d.getFullPathName()); return false; }
     homeSetting().getParentDirectory().createDirectory();
     homeSetting().replaceWithText(d.getFullPathName());
     if (m_runner) { setStatus("Saved: " + d.getFullPathName() + " - used from the next start"); return true; }
@@ -199,6 +276,10 @@ bool Ms2kProcessor::startMachine()
     cfg.flashStateSave = false;                              // the plugin's flash state lives in the project
     cfg.flashStateLoad = !m_haveProjectFlash;                // a fresh instance: the folder's, as the standalone
     if (m_haveProjectFlash && m_projectMask) { cfg.flashStateMask = m_projectMask; cfg.flashStateImage = m_projectImage; }
+#if MS2K_DEV_FLASH
+    cfg.devFlashPath = "MBM29LV800BA.bin";   // DEV-FLASH-1: developer build - the whole chip in the MS2000 folder
+    cfg.flashStateLoad = false; cfg.flashStateMask = 0; cfg.flashStateImage.clear();
+#endif
     MS2000::Ms2kGuiHooks hooks;
     hooks.logFn = [](const char*) {};
     m_runner = std::make_unique<MS2000::Ms2kRunner>(cfg, hooks);
@@ -236,6 +317,7 @@ void Ms2kProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    m_blocks.fetch_add(1, std::memory_order_relaxed);   // HOSTDIAG-1
     const int N = buffer.getNumSamples();
     std::unique_lock<std::mutex> machine(m_machineMx, std::try_to_lock);   // a reboot holds it: silence
     if (!machine.owns_lock() || !m_runner || N <= 0) { buffer.clear(); midi.clear(); return; }
@@ -248,6 +330,42 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (m_demoDiag == 0 && t >= t0) { setSwitch(4, 0, true); m_demoDiag = 1; }
         else if (m_demoDiag == 1 && t >= t0 + 0.2) { setSwitch(3, 6, true); m_demoDiag = 2; }
         else if (m_demoDiag == 2 && t >= t0 + 1.4) { setSwitch(3, 6, false); setSwitch(4, 0, false); m_demoDiag = 3; }
+    }
+
+    // PADSTORM diag (off unless set; FREEZE-PC hunt 2026-10-08): MS2K_PADSTORM=<start s>,<period ms>,<hold ms>,<seed>
+    // presses a pseudo-random program pad 1-16 every period (machine time) and logs, per press, the LCD, the H8 PC
+    // and the wall time the last period took, to %TEMP%\ms2k_padstorm.log - a stuck program change shows there.
+    if (static const char* ps = std::getenv("MS2K_PADSTORM"); ps) {
+        static double s0 = 3.0, per = 150.0, hold = 50.0; static unsigned seed = 1;
+        static const bool parsed = std::sscanf(ps, "%lf,%lf,%lf,%u", &s0, &per, &hold, &seed) > 0;
+        (void)parsed;
+        const double t = double(m_frames.load(std::memory_order_relaxed)) / m_hostRate;
+        if (t >= s0) {
+            const long n = long((t - s0) * 1000.0 / per);
+            const double ph = (t - s0) * 1000.0 - double(n) * per;
+            auto padSw = [this](int k, bool d) { setSwitch(k < 8 ? 6u : 5u, 7u - unsigned(k % 8), d); };
+            if (n != m_stormN) {
+                if (m_stormDown) padSw(m_stormPad, false);
+                seed = seed * 1103515245u + 12345u;
+                const int k = int((seed >> 16) % 16u);
+                const LcdGuiSnapshot s = m_runner->getLcdGuiSnapshot();
+                char l0[17], l1[17];
+                for (int i = 0; i < 16; ++i) { l0[i] = s.line0[i] >= 0x20 ? s.line0[i] : '.'; l1[i] = s.line1[i] >= 0x20 ? s.line1[i] : '.'; }
+                l0[16] = l1[16] = 0;
+                const double now = juce::Time::getMillisecondCounterHiRes();
+                static const std::string logPath = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\ms2k_padstorm.log";
+                if (FILE* f = std::fopen(logPath.c_str(), "a")) {
+                    std::fprintf(f, "%9.3f pad %2d | %s | %s | pc %06X | wall %7.1f ms\n", t, k + 1, l0, l1,
+                                 unsigned(m_runner->getEmulator().getProgramCounter()), m_stormWall > 0 ? now - m_stormWall : 0.0);
+                    std::fclose(f);
+                }
+                m_stormWall = now;
+                padSw(k, true);
+                m_stormPad = k; m_stormN = n; m_stormDown = true;
+            } else if (m_stormDown && ph >= hold) {
+                padSw(m_stormPad, false); m_stormDown = false;
+            }
+        }
     }
 
     // DEMO-FMT-1 diag (off unless set): MS2K_RAMDUMPAT=<s>[,<s>...]|<prefix> writes the DRAM (0x400000-0x47FFFF)
@@ -345,7 +463,20 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const uint64_t txBefore = dsp ? dsp->txFrames() : 0;
     m_outBytes.clear();
     if (toRender > 0) {
+        static const bool rlog = std::getenv("MS2K_RENDERLOG") != nullptr;   // CPU-PC hunt: render cost per 50 ms
+        const double rt0 = rlog ? juce::Time::getMillisecondCounterHiRes() : 0.0;
         m_runner->render(m_tmpL.data(), m_tmpR.data(), toRender, m_midiIn.data(), m_midiIn.size(), m_tmpFlags.data());
+        if (rlog) {
+            static double sum = 0.0, mx = 0.0, w0 = -1.0;
+            const double ms = juce::Time::getMillisecondCounterHiRes() - rt0, t = double(m_frames.load()) / m_hostRate;
+            sum += ms; mx = (std::max)(mx, ms);
+            if (w0 < 0.0) w0 = t;
+            if (t - w0 >= 0.05) {
+                static const std::string p = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\ms2k_render.log";
+                if (FILE* f = std::fopen(p.c_str(), "a")) { std::fprintf(f, "%8.3f %6.2f %6.2f\n", w0, sum, mx); std::fclose(f); }
+                sum = mx = 0.0; w0 = t;
+            }
+        }
         m_srcL.insert(m_srcL.end(), m_tmpL.begin(), m_tmpL.begin() + toRender);
         m_srcR.insert(m_srcR.end(), m_tmpR.begin(), m_tmpR.begin() + toRender);
     } else {
@@ -377,12 +508,36 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         const double p = double(frame > txBefore ? frame - txBefore : 0) / ratio;
         return juce::jlimit(0, N - 1, int(p));
     };
+    // HOSTDIAG-1 (R2): MS2K_HOSTDIAG=1 also logs every MIDI OUT message handed to the host; MS2K_NOMIDIOUT=1
+    // keeps them from the host altogether (A/B for the VSTHost Demo -> EXIT freeze: the host stops calling us).
+    static const bool s_outDiag = [] { const char* e = std::getenv("MS2K_HOSTDIAG"); return e && *e && *e != '0'; }();
+    static const bool s_noOut = [] { const char* e = std::getenv("MS2K_NOMIDIOUT"); return e && *e && *e != '0'; }();
+    const bool sysexToHost = sysexOut.load(std::memory_order_relaxed);
+    auto emitOut = [&](const uint8_t* d, int len, int at) {
+        if (s_outDiag) {
+            if (len == 1 && d[0] >= 0xF8) m_diagRt[d[0] - 0xF8].fetch_add(1, std::memory_order_relaxed);
+            else {
+                const uint32_t w = m_diagOutW.load(std::memory_order_relaxed);
+                auto& m = m_diagOut[w & 255];
+                m.blk = m_blocks.load(std::memory_order_relaxed); m.len = uint8_t(juce::jmin(len, 255));
+                for (int i = 0; i < 7; ++i) m.b[i] = i < len ? d[i] : 0;
+                m_diagOutW.store(w + 1, std::memory_order_release);
+            }
+        }
+        if (s_noOut) return;
+        // VSTHOST-SYSEX-1 (2026-10-08): Hermann Seib's VSTHost stops calling processBlock for good in the very block
+        // in which a VST3 plugin hands it a SysEx output event (measured: blocks frozen at 3130, the block that
+        // carried F0 42 30 58 4E 00 00 F7 - the firmware's mode message on Demo -> EXIT; F8/FE before it passed).
+        // Cubase takes the same event. A Settings switch (sysexOut, default ON) decides; no host detection.
+        if (len > 1 && d[0] == 0xF0 && !sysexToHost) return;
+        midi.addEvent(d, len, at);
+    };
     for (const auto& ob : m_outBytes) {
         const uint8_t b = ob.b; const int pos = posOf(ob.frame);
-        if (b >= 0xF8) { midi.addEvent(&b, 1, pos); continue; }
+        if (b >= 0xF8) { emitOut(&b, 1, pos); continue; }
         if (b == 0xF0) { m_outSysex = true; m_sysex.assign(1, b); m_outStatus = 0; continue; }
         if (m_outSysex) {
-            if (b == 0xF7) { m_sysex.push_back(b); midi.addEvent(m_sysex.data(), int(m_sysex.size()), pos); m_outSysex = false; m_sysex.clear(); continue; }
+            if (b == 0xF7) { m_sysex.push_back(b); emitOut(m_sysex.data(), int(m_sysex.size()), pos); m_outSysex = false; m_sysex.clear(); continue; }
             if (b & 0x80) { m_outSysex = false; m_sysex.clear(); }
             else { m_sysex.push_back(b); continue; }
         }
@@ -391,17 +546,59 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
             if (b < 0xF0) { m_outStatus = b; m_outNeed = ((b & 0xE0) == 0xC0) ? 1 : 2; m_outMsg[0] = b; }
             else if (b == 0xF1 || b == 0xF3) { m_outStatus = b; m_outNeed = 1; m_outMsg[0] = b; }
             else if (b == 0xF2) { m_outStatus = b; m_outNeed = 2; m_outMsg[0] = b; }
-            else if (b == 0xF6) midi.addEvent(&b, 1, pos);
+            else if (b == 0xF6) emitOut(&b, 1, pos);
             continue;
         }
         if (!m_outStatus) continue;
         m_outMsg[1 + m_outHave++] = b;
         if (m_outHave == m_outNeed) {
-            midi.addEvent(m_outMsg, 1 + m_outNeed, pos);
+            emitOut(m_outMsg, 1 + m_outNeed, pos);
             m_outHave = 0;
             if (m_outStatus >= 0xF0) m_outStatus = 0;
         }
     }
+}
+
+// ---- SETTINGS-1: user defaults ----
+// Until now the Settings switches lived only in the project chunk, so a new instance (and the restart that
+// "DSP on a second core" needs) always came up with the built-in defaults: hostClock + transportMsgs on, the rest off.
+static juce::PropertiesFile::Options settingsOptions()
+{
+    juce::PropertiesFile::Options o;
+    o.applicationName = "MS2000R";
+    o.filenameSuffix = "settings";
+    o.folderName = "MS2000R";
+    o.osxLibrarySubFolder = "Application Support";
+    return o;
+}
+
+void Ms2kProcessor::loadGlobalSettings()
+{
+    juce::PropertiesFile p(settingsOptions());
+    mic2 = p.getBoolValue("mic2", mic2);
+    dac20 = p.getBoolValue("dac20", dac20);
+    hostClock = p.getBoolValue("hostClock", hostClock.load());
+    transportMsgs = p.getBoolValue("transportMsgs", transportMsgs.load());
+    knobFollow = p.getBoolValue("knobFollow", knobFollow.load());
+    dspThread = p.getBoolValue("dspThread", dspThread.load());
+    sysexOut = p.getBoolValue("sysexOut", sysexOut.load());
+    powerSwitch = p.getBoolValue("powerSwitch", powerSwitch.load());
+    editorWDefault = p.getIntValue("editorW", 0);
+}
+
+void Ms2kProcessor::saveGlobalSettings() const
+{
+    juce::PropertiesFile p(settingsOptions());
+    p.setValue("mic2", mic2);
+    p.setValue("dac20", dac20);
+    p.setValue("hostClock", hostClock.load());
+    p.setValue("transportMsgs", transportMsgs.load());
+    p.setValue("knobFollow", knobFollow.load());
+    p.setValue("dspThread", dspThread.load());
+    p.setValue("sysexOut", sysexOut.load());
+    p.setValue("powerSwitch", powerSwitch.load());
+    if (editorWDefault >= 700) p.setValue("editorW", editorWDefault);
+    p.saveIfNeeded();
 }
 
 // ---- plugin state (VST3-2) ----
@@ -421,6 +618,8 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
     t.setProperty("transportMsgs", transportMsgs.load(), nullptr);
     t.setProperty("knobFollow", knobFollow.load(), nullptr);
     t.setProperty("dspThread", dspThread.load(), nullptr);
+    t.setProperty("sysexOut", sysexOut.load(), nullptr);
+    t.setProperty("powerSwitch", powerSwitch.load(), nullptr);
     t.setProperty("libraryPath", libraryPath, nullptr);
     uint32_t mask = 0; const uint8_t* img = nullptr;
     if (m_runner) { auto& f = m_runner->getEmulator().getFlashROM(); mask = f.stateMask(); img = f.data(); }
@@ -455,6 +654,8 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     transportMsgs = bool(t.getProperty("transportMsgs", true));
     knobFollow = bool(t.getProperty("knobFollow", false));
     dspThread = bool(t.getProperty("dspThread", false));
+    sysexOut = bool(t.getProperty("sysexOut", sysexOut.load()));
+    powerSwitch = bool(t.getProperty("powerSwitch", powerSwitch.load()));
     libraryPath = t.getProperty("libraryPath", "").toString();
 
     // the flash this project's machine had
@@ -488,10 +689,8 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     if (m_runner && !same) {                 // a different machine: power cycle it with this flash
         std::lock_guard<std::mutex> l(m_machineMx);
         stopMachine();
-        m_srcL.clear(); m_srcR.clear(); m_interpL.reset(); m_interpR.reset();
-        m_outBytes.clear(); m_outStatus = 0; m_outHave = 0; m_outSysex = false; m_sysex.clear();
-        for (int ch = 0; ch < 2; ++ch) { m_inFifo[ch].clear(); m_inInterp[ch].reset(); }
-        startMachine();
+        clearStreams();
+        if (!m_poweredOff) startMachine();
     } else {
         applyPanel();
     }

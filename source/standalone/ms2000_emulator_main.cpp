@@ -522,7 +522,7 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void
 #endif
 static void ms2kFindHome() {
     namespace fs = std::filesystem;
-    auto ok = [](const fs::path& d) { std::error_code ec; return fs::exists(d / "flash.bin", ec) && fs::exists(d / "full FW" / "boot-362.ms2000.bin", ec); };
+    auto ok = [](const fs::path& d) { std::error_code ec; return fs::exists(d / "flash.bin", ec) && (fs::exists(d / "full FW" / "boot-362.ms2000.bin", ec) || fs::exists(d / "full FW" / "boot-362.bin", ec)); };
     fs::path home;
     if (const char* e = std::getenv("MS2K_HOME"); e && *e && ok(fs::path(e))) home = e;
     else if (ok(fs::current_path())) return;
@@ -608,6 +608,9 @@ int main(int argc, char** argv) {
         
         Ms2kConfig cfg;
         cfg.romPath = config.rom;
+#if MS2K_DEV_FLASH
+    cfg.devFlashPath = "MBM29LV800BA.bin";   // DEV-FLASH-1
+#endif
         cfg.crashDumpsDir = config.crashDumpsDir;
         cfg.deterministicConfig.fixedSeed = true;
         cfg.deterministicConfig.prngSeed = 12345;
@@ -1061,6 +1064,9 @@ int main(int argc, char** argv) {
         // Configure Ms2kRunner
         MS2000::Ms2kConfig cfg;
         cfg.romPath = config.rom;
+#if MS2K_DEV_FLASH
+    cfg.devFlashPath = "MBM29LV800BA.bin";   // DEV-FLASH-1
+#endif
         cfg.cpuCyclesPerTick = 20000;
         cfg.sampleRate = config.sampleRate;
         cfg.useMmcss = config.useMmcss;
@@ -1125,6 +1131,9 @@ int main(int argc, char** argv) {
 
     Ms2kConfig cfg;
     cfg.romPath = config.rom;
+#if MS2K_DEV_FLASH
+    cfg.devFlashPath = "MBM29LV800BA.bin";   // DEV-FLASH-1
+#endif
     cfg.cpuCyclesPerTick = 20000;
     cfg.sampleRate = 48000;
     cfg.useMmcss = config.useMmcss;  // fw18.txt: MMCSS configuration

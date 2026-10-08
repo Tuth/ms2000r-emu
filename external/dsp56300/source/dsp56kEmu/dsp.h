@@ -647,12 +647,15 @@ namespace dsp56k
 		}
 
 		// value needs to fit into 48 (arithmetic saturation mode) or 56 bits
-		void sr_v_update( const int64_t& _notLimitedResult, TReg56& _result )
+		// _saturate = false for the ops SM never applies to (MACsu/uu, MPYsu/uu, DMACsu/uu: DSP56300FM 3-10 Note)
+		void sr_v_update( const int64_t& _notLimitedResult, TReg56& _result, bool _saturate = true )
 		{
-			if( sr_test_noCache(SR_SM) )
+			if( _saturate && sr_test_noCache(SR_SM) )
 			{
-				const unsigned int test=static_cast<unsigned int>(_result.var>>(47 + g_aluShift))&0x13;
-				if (!(test ^ 0x13) || !(test)) sr_set(CCR_V);
+				// SM: the result saturates on 48 bits (Table 3-1) and V means "saturated" (5-16). The call to
+				// limit_arithmeticSaturation was dropped by upstream a949e03c (2021, "faster V update") - restored.
+				sr_clear(CCR_V);
+				limit_arithmeticSaturation(_result);
 			}
 			else
 			{
@@ -839,6 +842,16 @@ namespace dsp56k
 		void limit_transfer( TWord& _dst, const TReg56& _src )
 		{
 			limit_transfer( reinterpret_cast<int&>(_dst), _src );
+		}
+
+		// the ALU ops that set V themselves: under SM their result saturates, V = saturated, L sticky
+		void alu_saturateSM( TReg56& _d )
+		{
+			if( !sr_test_noCache(SR_SM) )
+				return;
+			sr_clear(CCR_V);
+			limit_arithmeticSaturation(_d);
+			sr_l_update_by_v();
 		}
 
 		void limit_arithmeticSaturation( TReg56& _dst )

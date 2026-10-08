@@ -247,9 +247,27 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
     }
 
     const char* env = std::getenv("MS2K_DSPROM");
-    const std::string path = (env && *env) ? env : "full FW/boot-362.ms2000.bin";
-    std::ifstream f(path, std::ios::binary);
-    const std::vector<uint8_t> rom{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+    std::string path = (env && *env) ? env : "full FW/boot-362.ms2000.bin";
+    auto readAll = [](const std::string& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+    };
+    std::vector<uint8_t> rom = readAll(path);
+    // BOOTROM-1 (2026-10-08): the corrected copy is a LOCAL file nobody else has. The public dump
+    // (full FW/boot-362.bin, 192 words, sha1 c18cbc0f...) differs from it in exactly two words, $17 and
+    // $2D: `jclr/jset #1,omr,$FF0018` where the published listing (UM Appendix A, RENDERED p.237) and the
+    // MS2000 board (KOD-A30412: mode 5, SPI) require $FF0019 - see CLAUDE.md "VALIDATION". So with no
+    // corrected copy present, the public dump is read and THOSE TWO WORDS ONLY are corrected in memory,
+    // and only if they hold the dump's value; the file on disk is never touched. MS2K_DSPROM stays literal.
+    if (rom.empty() && !(env && *env)) {
+        path = "full FW/boot-362.bin";
+        rom = readAll(path);
+        auto word = [&](size_t w) { return uint32_t(rom[w * 4]) | uint32_t(rom[w * 4 + 1]) << 8 | uint32_t(rom[w * 4 + 2]) << 16; };
+        if (rom.size() == 768 && word(0x17) == 0xFF0018 && word(0x2D) == 0xFF0018) {
+            rom[0x17 * 4] = 0x19; rom[0x2D * 4] = 0x19;
+            printf("[DSP56362] boot ROM: %s with words $17/$2D corrected $FF0018 -> $FF0019 (BOOTROM-1)\n", path.c_str());
+        }
+    }
     if (rom.size() != 768) {
         printf("[DSP56362] NOT BUILT - boot ROM '%s' %s (need 768 bytes = 192 words x 4, LE). "
                "The ROM is local-only; see CLAUDE.md 'THE VINTAGE BOOT ROM'.\n",
@@ -357,6 +375,7 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
             f[1] = Audio::RxSlot{ wr, 0, 0, 0 };
         });
         if (const char* w = std::getenv("MS2K_DSPWAV"); w && *w) m_wavPath = w;
+        if (const char* d = std::getenv("MS2K_DACMODEL"); d && *d == '0') m_dacModelOn = false;   // DAC-1 A/B
         esai.setWriteTxCallback([this](uint64_t& idx, const Audio::TxFrame& f) {
             ++idx; ++m_txFrames;
             for (uint32_t s = 0; s < f.size() && s < 2; ++s)          // which lines carry signal
@@ -371,6 +390,7 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
             if (m_audioRingOn && f.size() >= 2) {
                 int32_t l = int32_t(f[0][0] << 8) >> 8, r = int32_t(f[1][0] << 8) >> 8;
                 if (m_dac20.load(std::memory_order_relaxed)) { l = ak4522Dac20(l); r = ak4522Dac20(r); }   // AUDIO-IN round: DAC option
+                if (m_dacModelOn) m_dacModel.process(l, r);              // DAC-1: digital filter + output coupling (ak4522.h)
                 pushAudio(l, r);
             }
             if (!m_wavPath.empty() && f.size() >= 2 && m_wav.size() < 2 * 48000 * 60) {

@@ -1,4 +1,5 @@
 #include "jitblock.h"
+#include "jitdspmode.h"
 #include "jitops.h"
 #include "jitregtypes.h"
 
@@ -12,9 +13,87 @@ namespace dsp56k
 		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(_mask));
 	}
 
-	void JitOps::ccr_dirty(TWord _aluIndex, const JitReg64& _alu, const CCRMask _dirtyBits)
+	bool JitOps::smSaturates() const
 	{
+		const auto* mode = m_block.getMode();
+		if(!mode || !mode->testSR(SRB_SM))
+			return false;
+
+		// DSP56300FM 3.2.3: saturation applies to Data ALU results going to an accumulator, and is always disabled for
+		// TFR, Tcc, DMACsu, DMACuu, MACsu, MACuu, MPYsu, MPYuu, CMPU and the BFU ops. CMP / CMPM / TST write no
+		// accumulator, logical ops do not pass the MAC unit.
+		switch(m_aluInstruction)
+		{
+		case Abs: case ADC:
+		case Add_SD: case Add_xx: case Add_xxxx: case Addl: case Addr:
+		case Asl_D: case Asl_ii: case Asl_S1S2D: case Asr_D: case Asr_ii: case Asr_S1S2D:
+		case Dec: case Inc: case Neg: case Rnd: case Sbc:
+		case Sub_SD: case Sub_xx: case Sub_xxxx: case Subl: case Subr:
+		case Mac_S1S2: case Mac_S: case Maci_xxxx: case Macr_S1S2: case Macr_S: case Macri_xxxx:
+		case Mpy_S1S2D: case Mpy_SD: case Mpyi: case Mpyr_S1S2D: case Mpyr_SD: case Mpyri:
+			return true;
+		case Dmac:
+			return getFieldValue<Dmac, Field_S, Field_s>(m_opWordA) == 0;	// DMACss only
+		default:
+			return false;
+		}
+	}
+
+	void JitOps::alu_saturateSM(const JitReg64& _alu)
+	{
+		// Table 3-1: EXT[7], EXT[0], MSP[23] = accumulator bits 55, 48, 47. 000 / 111: unchanged; EXT[7] = 0:
+		// $00 7FFFFF FFFFFF, EXT[7] = 1: $FF 800000 000000. V and L are set when it saturates (3-10). The C bit is
+		// not affected (5-16). The constants are not scaled (3-10).
+		static_assert(g_leftAlignedAlu, "written for the left-aligned accumulator (bit 55 at host bit 63)");
+
+		const auto done = m_asm.newLabel();
+		const RegGP t(m_block);
+		const RegGP u(m_block);
+
+		m_asm.mov(r64(t), _alu);
+		m_asm.shr(r64(t), asmjit::Imm(47 + g_aluBitOffset));	// [8] = bit 55, [1] = bit 48, [0] = bit 47
+		m_asm.mov(r64(u), asmjit::Imm(0x103));
+		m_asm.and_(r64(t), r64(u));
+		m_asm.test_(r64(t));
+		m_asm.jz(done);
+		m_asm.cmp(r64(t), asmjit::Imm(0x103));
+		m_asm.jz(done);
+
+		// bit 55 set: $FF800000000000 = ~$007FFFFFFFFFFF (left-aligned, low 8 bits clear)
+		m_asm.mov(r64(t), _alu);
+		m_asm.sar(r64(t), asmjit::Imm(63));
+		m_asm.mov(r64(u), asmjit::Imm(0x007FFFFFFFFFFFull << g_aluBitOffset));
+		m_asm.xor_(r64(u), r64(t));
+		m_asm.and_(r64(u), asmjit::Imm(-static_cast<int64_t>(1ll << g_aluBitOffset)));
+		m_asm.mov(_alu, r64(u));
+		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(CCR_V));
+		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(CCR_L));
+
+		m_asm.bind(done);
+	}
+
+	void JitOps::ccr_dirty(TWord _aluIndex, const JitReg64& _alu, CCRMask _dirtyBits)
+	{
+		// SM: V means "saturated" now (5-16: an overflow is a result not representable without the extension), so it
+		// is not left to the lazy 56-bit V update
+		// (IF form, m_disableCCRUpdates: the result still saturates; op_Ifcc puts the CCR back afterwards)
+		const bool smAny = smSaturates();
+		const bool sm = smAny && !m_disableCCRUpdates;
+		if(smAny && !sm)
+			alu_saturateSM(_alu);
+		if(sm)
+			_dirtyBits = static_cast<CCRMask>(_dirtyBits & ~CCR_V);
+
 		m_ccrWritten |= _dirtyBits;
+
+		if(sm)
+		{
+			m_ccrWritten |= CCR_V;
+			// pending bits of the previous op first (they read regLastModAlu), then V cleared and set by the saturation
+			updateDirtyCCR(static_cast<CCRMask>(m_ccrDirty & ~_dirtyBits));
+			ccr_clear(CCR_V);
+			alu_saturateSM(_alu);
+		}
 
 		if constexpr(g_useSRCache)
 		{

@@ -66,6 +66,8 @@ private:
     juce::TextButton m_demo{ "Demo songs  (EXIT + GLOBAL)" };
     juce::TextButton m_syxLoad{ "Load .syx..." }, m_syxSave{ "Save all programs as .syx..." };
     juce::Label m_syxStatus;
+    juce::ToggleButton m_powerSw{ "POWER switch on the Master VOLUME: off at the minimum, as on the unit (off: a fade to 0 keeps it running)" };
+    juce::ToggleButton m_sysexOut{ "MIDI OUT SysEx -> host  (off for hosts that stop on a plugin's SysEx output, e.g. VSTHost)" };
     juce::ToggleButton m_transport{ "Host transport -> Start / Stop  (the arpeggiator starts on a quarter note with the host)" };
     // LIBRARY-1: the programs of a .syx file; a click sends one to the edit buffer
     juce::TextButton m_tabLibrary{ "Library" }, m_libOpen{ "Open .syx..." };
@@ -81,6 +83,8 @@ private:
     juce::ToggleButton m_follow{ "Knobs show the program  (off: a pot stays where you leave it, as on the unit)" };
     uint16_t m_disp[4][8] = {};
     int m_lastMoved = -1; juce::uint32 m_lastMoveMs = 0;
+    bool m_userSet[4][8] = {};                           // KNOB-FOLLOW-2: pots the user moved since the program came up
+    uint64_t m_progId = 0;                               // KNOB-FOLLOW-2: name + timbre of the program the pots follow
     bool refreshKnobs();                    // true when a drawn pot changed
     juce::TextButton m_homeBtn{ "Choose the MS2000 folder..." };
     std::unique_ptr<juce::FileChooser> m_chooser;

@@ -84,6 +84,7 @@ namespace dsp56k
 	{
 		conditionCodes();
 		ccrGroundTruth();
+		arithmeticSaturation();
 		aguModulo();
 		aguMultiWrapModulo();
 		aguBitreverse();
@@ -757,6 +758,58 @@ namespace dsp56k
 			verify(dsp.aluA() == 0x00EEDDCCBBAA9A);
 			verify(dsp.aluB() == 0x0000aabbccddeeff);
 		});
+	}
+
+	void UnitTests::arithmeticSaturation()
+	{
+		// DSP56300FM rev.5 3.2.3 + Table 3-1 (rendered pages 3-9/3-10), SR bit 20 (5-11), V (5-16): with SM set the
+		// result going to the accumulator is checked on bits 55, 48, 47 after rounding: 000 / 111 unchanged, else
+		// $007FFFFFFFFFFF (bit 55 = 0) or $FF800000000000 (bit 55 = 1); V and L set when it saturates. Dropped from the
+		// interpreter by upstream a949e03c (2021) and never in the JIT.
+		auto sat = [&](bool _sm, uint64_t _a, uint64_t _b, const char* _op, uint64_t _expect, bool _v, TWord _raw = 0)
+		{
+			runTest([&]()
+			{
+				dsp.setSR(_sm ? SR_SM : 0);
+				dsp.setALU(false, TReg56(static_cast<TReg56::MyType>(_a)));
+				dsp.setALU(true, TReg56(static_cast<TReg56::MyType>(_b)));
+				dsp.reg.x.var = 0x400000;	// x0 = 0.5
+				dsp.reg.y.var = 0x400000;	// y0 = 0.5
+				if(_raw) emit(_raw); else emit(_op);
+			}, [&]()
+			{
+				if(dsp.aluA().var != _expect || bool(dsp.sr_test(CCR_V)) != _v)
+					std::printf("SM=%d %s a=%014llX b=%014llX: got %014llX V=%d, expected %014llX V=%d\n", int(_sm), _op,
+						static_cast<unsigned long long>(_a), static_cast<unsigned long long>(_b),
+						static_cast<unsigned long long>(dsp.aluA().var), int(bool(dsp.sr_test(CCR_V))),
+						static_cast<unsigned long long>(_expect), int(_v));
+				verify(dsp.aluA().var == _expect);
+				verify(bool(dsp.sr_test(CCR_V)) == _v);
+				if(_v)
+					verify(dsp.sr_test(CCR_L));
+			});
+		};
+		// 001: positive past 48 bits -> $007FFFFFFFFFFF, V
+		sat(true , 0x00400000000000, 0x00400000000000, "add b,a", 0x007fffffffffff, true);
+		sat(false, 0x00400000000000, 0x00400000000000, "add b,a", 0x00800000000000, false);	// SM off: 56 bits, no V
+		// 111: unchanged
+		sat(true , 0xffc00000000000, 0x00400000000000, "sub b,a", 0xff800000000000, false);
+		// 110: negative past 48 bits -> $FF800000000000, V
+		sat(true , 0xff800000000000, 0x00000000000001, "sub b,a", 0xff800000000000, true);
+		// 010: bit 48 alone -> positive saturation
+		sat(true , 0x01000000000000, 0x00000000000000, "add b,a", 0x007fffffffffff, true);
+		// 000 with bits 54..49 set: the table looks at 3 bits only -> unchanged, no V
+		sat(true , 0x7e000000000000, 0x00000000000000, "add b,a", 0x7e000000000000, false);
+		// MAC: $007FFFFFFFFFFF + 0.25 -> saturated
+		// (raw MAC y0,x0,A = 1QQQdk10 with QQQ 101: the test assembler turns "mac" into MACsu, which never saturates)
+		sat(true , 0x007fffffffffff, 0, "mac y0,x0,a", 0x007fffffffffff, true, 0x2000d2);
+		// MACsu is never saturated (3-10 Note): the same sum stays
+		sat(true , 0x007fffffffffff, 0, "macsu x0,y0,a", 0x009fffffffffff, false);
+		// TFR is never saturated (3-10 Note)
+		// (raw TFR B,A = 0JJJd001 with JJJ 000, d 0: the test assembler turns "tfr" into RND)
+		sat(true , 0, 0x00800000000000, "tfr b,a", 0x00800000000000, false, 0x200001);
+
+		dsp.setSR(0);	// SM off again: the tests that follow assume it
 	}
 
 	void UnitTests::add()

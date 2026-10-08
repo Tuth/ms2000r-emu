@@ -291,6 +291,9 @@ void Ms2kRunner::stop() {
         }
     }
 
+    // DEV-FLASH-1: the last writes go to the chip image
+    if (m_cpu && !m_cfg.devFlashPath.empty() && m_cpu->getFlashROM().writeGeneration() != m_devGen)
+        m_cpu->getFlashROM().saveToFile(m_cfg.devFlashPath);
     // BUG126: keep what the firmware wrote into the flash (see boot_mapAndVBR).
     if (m_cpu && m_cpu->getFlashROM().dirtySectors()) {
         const char* fs = std::getenv("MS2K_FLASHSTATE");
@@ -350,6 +353,12 @@ bool Ms2kRunner::tickHousekeeping() {
         if (fb && *fb && !done && m_cpu && m_cpu->getCycles() > 8ull * m_cpu->getClockFrequency()) { done = true; m_cpu->debugFindBytes(fb); }
     }
     ms2k_phase("runner-tick");
+    // DEV-FLASH-1: about once a second of machine time (115 ticks x 20,000 steps), new flash writes go to the image
+    if (!m_cfg.devFlashPath.empty() && m_cpu && ++m_devTicks >= 115) {
+        m_devTicks = 0;
+        auto& fl = m_cpu->getFlashROM();
+        if (fl.writeGeneration() != m_devGen && fl.saveToFile(m_cfg.devFlashPath)) m_devGen = fl.writeGeneration();
+    }
     
     // Set timer tick flag (after at least some execution)
     s_lcd.g_tick_ok = true;
@@ -649,7 +658,14 @@ void Ms2kRunner::boot_mapAndVBR() {
     m_cpu = std::make_unique<MS2000::H8S2350Emulator>();
     
     // Load ROM
-    if (!m_cpu->loadFirmwareFromFile(m_cfg.romPath)) {
+    // DEV-FLASH-1: in a developer build the full chip image is the flash, when it exists (1 MB)
+    std::string romPath = m_cfg.romPath;
+    bool devFromImage = false;
+    if (!m_cfg.devFlashPath.empty()) {
+        std::ifstream di(m_cfg.devFlashPath, std::ios::binary | std::ios::ate);
+        if (di && uint64_t(di.tellg()) == uint64_t(MS2000::FlashROM::FLASH_SIZE)) { romPath = m_cfg.devFlashPath; devFromImage = true; }
+    }
+    if (!m_cpu->loadFirmwareFromFile(romPath)) {
         postLog("[BOOT] ROM load failed\n");
         throw std::runtime_error("ROM load failed");
     }
@@ -658,7 +674,13 @@ void Ms2kRunner::boot_mapAndVBR() {
     // written. MS2K_FLASHSTATE=off = factory flash every run (measurement runs use it).
     {
         const char* fs = std::getenv("MS2K_FLASHSTATE");
-        if (!(fs && std::strcmp(fs, "off") == 0) && m_cfg.flashStateMask) {
+        if (!m_cfg.devFlashPath.empty()) {   // DEV-FLASH-1: the chip image is the whole truth
+            if (!devFromImage) m_cpu->getFlashROM().saveToFile(m_cfg.devFlashPath);
+            char line[300];
+            snprintf(line, sizeof line, "[BOOT] DEV-FLASH: flash = %s (%s)\n", m_cfg.devFlashPath.c_str(),
+                     devFromImage ? "the chip image" : "made from the ROM now");
+            postLog(line);
+        } else if (!(fs && std::strcmp(fs, "off") == 0) && m_cfg.flashStateMask) {
             const uint32_t m = m_cpu->getFlashROM().loadStateFrom(m_cfg.flashStateMask, m_cfg.flashStateImage.data(), m_cfg.flashStateImage.size());
             m_cpu->invalidateDecodeCache();
             char line[160];

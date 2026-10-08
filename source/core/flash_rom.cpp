@@ -149,7 +149,7 @@ void FlashROM::programWord(uint32_t w, uint16_t d, uint32_t pc) {
     const uint16_t old = arrayWord(w);
     const uint16_t now = uint16_t(old & d);       // p.18: program only clears bits
     if (a + 1 < data_.size()) { data_[a] = uint8_t(now >> 8); data_[a + 1] = uint8_t(now); }
-    if (now != old) dirty_ |= 1u << sectorOf(a);   // BUG126
+    if (now != old) { dirty_ |= 1u << sectorOf(a); ++gen_; }   // BUG126
     if (d & ~old) {
         // p.18: asking for a 0 -> 1 "may halt the operation and cause the DQ5 bit to be
         // set to 1"; p.23: then "the system must write the reset command".
@@ -167,7 +167,7 @@ void FlashROM::eraseSectorAt(uint32_t w, uint32_t pc) {
     uint32_t s = 0, e = 0;
     sectorRange(sa, s, e);
     eraseSector(sa);
-    dirty_ |= 1u << sa;                           // BUG126
+    dirty_ |= 1u << sa; ++gen_;                           // BUG126
     if (flashReportAllowed())
         printf("[FLASH-ERASE] sector SA%u 0x%05X-0x%05X erased (PC=0x%06X)\n", sa, s, e, pc);
 }
@@ -256,7 +256,7 @@ void FlashROM::busWrite(uint32_t w, uint16_t d, uint32_t pc) {
             if (lo == 0x30) { eraseSectorAt(w, pc); resetToRead(); return; }   // SA/30
             if (a == 0x555 && lo == 0x10) {
                 eraseChip(); resetToRead();
-                dirty_ = (1u << NUM_SECTORS) - 1u;       // BUG126
+                dirty_ = (1u << NUM_SECTORS) - 1u; ++gen_;       // BUG126
                 if (flashReportAllowed()) printf("[FLASH-ERASE] CHIP erased (PC=0x%06X)\n", pc);
                 return;
             }

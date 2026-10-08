@@ -94,6 +94,7 @@ namespace dsp56k
 //		sr_u_update(d);
 //		sr_n_update(d);
 
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 
 	//	dumpCCCC();
@@ -200,6 +201,7 @@ namespace dsp56k
 		sr_l_update_by_v();
 
 		sr_z_update(d);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -226,6 +228,7 @@ namespace dsp56k
 		sr_z_update(d);
 		sr_clear(CCR_V);
 		//sr_l_update_by_v();
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(abDst, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -261,6 +264,7 @@ namespace dsp56k
 		sr_z_update(d);
 		sr_toggle(CCR_V, isOverflow);
 		sr_l_update_by_v();
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(abDst, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -339,6 +343,7 @@ namespace dsp56k
 		sr_toggle(CCR_V, overflow);
 		sr_l_update_by_v();
 		sr_toggle(CCR_C, carry);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -481,7 +486,7 @@ namespace dsp56k
 
 		// Update SR
 		sr_z_update( d );
-		sr_v_update(res,d);
+		sr_v_update(res,d,false);	// MPYsu/uu: never saturated (SM)
 
 		sr_l_update_by_v();
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
@@ -522,7 +527,7 @@ namespace dsp56k
 
 		// Update SR
 		sr_z_update( d );
-		sr_v_update(res,d);
+		sr_v_update(res,d,!srcUnsigned && !dstUnsigned);	// DMACss only saturates (SM)
 
 		sr_l_update_by_v();
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
@@ -561,7 +566,7 @@ namespace dsp56k
 
 		// Update SR
 		sr_z_update( d );
-		sr_v_update(res,d);
+		sr_v_update(res,d,false);	// MACsu/uu: never saturated (SM)
 
 		sr_l_update_by_v();
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
@@ -869,6 +874,7 @@ namespace dsp56k
 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == maximum);
 		sr_l_update_by_v();
 		sr_toggle(CCR_C, borrow);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -1037,6 +1043,7 @@ namespace dsp56k
 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == minimum);
 		sr_l_update_by_v();
 		sr_toggle(CCR_C, d.var == 0);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 
@@ -1460,6 +1467,7 @@ namespace dsp56k
 		sr_z_update(d);
 		//sr_l_update_by_v();
 		sr_c_update_arithmetic(old, d);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 	inline void DSP::op_Subr(const TWord op)
@@ -1476,6 +1484,7 @@ namespace dsp56k
 		sr_z_update(d);
 		//sr_l_update_by_v();
 		sr_c_update_arithmetic(old, d);
+		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
 	}
 	inline void DSP::op_Tfr(const TWord op)

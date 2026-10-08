@@ -30,6 +30,7 @@
 //     KOD-A30412. Modelled through the library's EsaiClock at 48 kHz per core-cycle count.
 //   * PORT_RESET (the DSP's RESET) is not yet driven by the MCU port that owns it.
 #include <atomic>
+#include "ak4522.h"
 #include <immintrin.h>
 #include <condition_variable>
 #include <mutex>
@@ -224,6 +225,8 @@ private:
     std::atomic<uint64_t> m_inClips[2] = {};
     std::atomic<float>    m_vr30{1.0f}, m_vr31{1.0f};
     std::atomic<bool>     m_mic2{false}, m_dac20{false};
+    Ak4522Dac             m_dacModel;                 // DAC-1: AK4522 DAC filter + line-out coupling (ESAI TX thread)
+    bool                  m_dacModelOn = true;        // MS2K_DACMODEL=0 bypasses it (A/B)
     std::vector<float>    m_inFile;                 // MS2K_AUDIOIN=<wav>: headless input, interleaved stereo
     size_t                m_inFilePos = 0;
     std::unique_ptr<Ak4522Adc> m_adc;

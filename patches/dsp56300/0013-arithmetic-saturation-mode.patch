@@ -1,0 +1,405 @@
+diff --git a/source/dsp56kEmu/dsp.h b/source/dsp56kEmu/dsp.h
+--- a/source/dsp56kEmu/dsp.h
++++ b/source/dsp56kEmu/dsp.h
+@@ -647,12 +647,15 @@
+ 		}
+ 
+ 		// value needs to fit into 48 (arithmetic saturation mode) or 56 bits
+-		void sr_v_update( const int64_t& _notLimitedResult, TReg56& _result )
+-		{
+-			if( sr_test_noCache(SR_SM) )
++		// _saturate = false for the ops SM never applies to (MACsu/uu, MPYsu/uu, DMACsu/uu: DSP56300FM 3-10 Note)
++		void sr_v_update( const int64_t& _notLimitedResult, TReg56& _result, bool _saturate = true )
++		{
++			if( _saturate && sr_test_noCache(SR_SM) )
+ 			{
+-				const unsigned int test=static_cast<unsigned int>(_result.var>>(47 + g_aluShift))&0x13;
+-				if (!(test ^ 0x13) || !(test)) sr_set(CCR_V);
++				// SM: the result saturates on 48 bits (Table 3-1) and V means "saturated" (5-16). The call to
++				// limit_arithmeticSaturation was dropped by upstream a949e03c (2021, "faster V update") - restored.
++				sr_clear(CCR_V);
++				limit_arithmeticSaturation(_result);
+ 			}
+ 			else
+ 			{
+@@ -839,6 +842,16 @@
+ 		void limit_transfer( TWord& _dst, const TReg56& _src )
+ 		{
+ 			limit_transfer( reinterpret_cast<int&>(_dst), _src );
++		}
++
++		// the ALU ops that set V themselves: under SM their result saturates, V = saturated, L sticky
++		void alu_saturateSM( TReg56& _d )
++		{
++			if( !sr_test_noCache(SR_SM) )
++				return;
++			sr_clear(CCR_V);
++			limit_arithmeticSaturation(_d);
++			sr_l_update_by_v();
+ 		}
+ 
+ 		void limit_arithmeticSaturation( TReg56& _dst )
+diff --git a/source/dsp56kEmu/dsp.cpp b/source/dsp56kEmu/dsp.cpp
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -1331,6 +1331,7 @@
+ 		sr_z_update(d);
+ 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == minimum);
+ 		sr_l_update_by_v();
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_S | CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -1366,6 +1367,7 @@
+ 		sr_z_update(d);
+ 		sr_toggle(CCR_V, value == minimum);
+ 		sr_l_update_by_v();
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_S | CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+diff --git a/source/dsp56kEmu/dsp_ops_alu.inl b/source/dsp56kEmu/dsp_ops_alu.inl
+--- a/source/dsp56kEmu/dsp_ops_alu.inl
++++ b/source/dsp56kEmu/dsp_ops_alu.inl
+@@ -94,6 +94,7 @@
+ //		sr_u_update(d);
+ //		sr_n_update(d);
+ 
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 
+ 	//	dumpCCCC();
+@@ -200,6 +201,7 @@
+ 		sr_l_update_by_v();
+ 
+ 		sr_z_update(d);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -226,6 +228,7 @@
+ 		sr_z_update(d);
+ 		sr_clear(CCR_V);
+ 		//sr_l_update_by_v();
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(abDst, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -261,6 +264,7 @@
+ 		sr_z_update(d);
+ 		sr_toggle(CCR_V, isOverflow);
+ 		sr_l_update_by_v();
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(abDst, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -339,6 +343,7 @@
+ 		sr_toggle(CCR_V, overflow);
+ 		sr_l_update_by_v();
+ 		sr_toggle(CCR_C, carry);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -481,7 +486,7 @@
+ 
+ 		// Update SR
+ 		sr_z_update( d );
+-		sr_v_update(res,d);
++		sr_v_update(res,d,false);	// MPYsu/uu: never saturated (SM)
+ 
+ 		sr_l_update_by_v();
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+@@ -522,7 +527,7 @@
+ 
+ 		// Update SR
+ 		sr_z_update( d );
+-		sr_v_update(res,d);
++		sr_v_update(res,d,!srcUnsigned && !dstUnsigned);	// DMACss only saturates (SM)
+ 
+ 		sr_l_update_by_v();
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+@@ -561,7 +566,7 @@
+ 
+ 		// Update SR
+ 		sr_z_update( d );
+-		sr_v_update(res,d);
++		sr_v_update(res,d,false);	// MACsu/uu: never saturated (SM)
+ 
+ 		sr_l_update_by_v();
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+@@ -869,6 +874,7 @@
+ 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == maximum);
+ 		sr_l_update_by_v();
+ 		sr_toggle(CCR_C, borrow);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -1037,6 +1043,7 @@
+ 		sr_toggle(CCR_V, static_cast<uint64_t>(d.var) == minimum);
+ 		sr_l_update_by_v();
+ 		sr_toggle(CCR_C, d.var == 0);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 
+@@ -1460,6 +1467,7 @@
+ 		sr_z_update(d);
+ 		//sr_l_update_by_v();
+ 		sr_c_update_arithmetic(old, d);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 	inline void DSP::op_Subr(const TWord op)
+@@ -1476,6 +1484,7 @@
+ 		sr_z_update(d);
+ 		//sr_l_update_by_v();
+ 		sr_c_update_arithmetic(old, d);
++		alu_saturateSM(d);	// SR SM (DSP56300FM 3.2.3, Table 3-1)
+ 		setCCRDirty(ab, d, CCR_E | CCR_U | CCR_N);
+ 	}
+ 	inline void DSP::op_Tfr(const TWord op)
+diff --git a/source/dsp56kEmu/jitops.h b/source/dsp56kEmu/jitops.h
+--- a/source/dsp56kEmu/jitops.h
++++ b/source/dsp56kEmu/jitops.h
+@@ -562,6 +562,11 @@
+ 		void ccr_clear(CCRMask _mask);
+ 		void ccr_set(CCRMask _mask);
+ 		void ccr_dirty(TWord _aluIndex, const JitReg64& _alu, CCRMask _dirtyBits = static_cast<CCRMask>(CCR_E | CCR_U));
++		// Arithmetic Saturation Mode (SR SM, DSP56300FM 3.2.3 / Table 3-1): true when the op being compiled is a Data
++		// ALU arithmetic op whose result goes to an accumulator and the block's mode has SM set (compile time: SM is a
++		// JIT mode bit, so blocks compiled with SM = 0 get no extra code)
++		bool smSaturates() const;
++		void alu_saturateSM(const JitReg64& _alu);
+ 		void ccr_clearDirty(CCRMask _mask);
+ 		void updateDirtyCCR();
+ 		void updateDirtyCCR(CCRMask _whatToUpdate);
+@@ -748,6 +753,7 @@
+ 
+ 		TWord m_opSize = 0;
+ 		Instruction m_instruction = InstructionCount;
++		Instruction m_aluInstruction = InstructionCount;	// the ALU half of a parallel op, else m_instruction
+ 
+ 		uint32_t m_resultFlags = None;
+ 		RepMode m_repMode = RepNone;
+diff --git a/source/dsp56kEmu/jitops.cpp b/source/dsp56kEmu/jitops.cpp
+--- a/source/dsp56kEmu/jitops.cpp
++++ b/source/dsp56kEmu/jitops.cpp
+@@ -362,6 +362,7 @@
+ 	void JitOps::emit(const Instruction _inst, const TWord _op)
+ 	{
+ 		m_instruction = _inst;
++		m_aluInstruction = _inst;
+ 
+ 		getRegisters(m_writtenRegs, m_readRegs, _inst, _op);
+ 
+@@ -378,6 +379,7 @@
+ 	void JitOps::emit(const Instruction _instMove, const Instruction _instAlu, const TWord _op)
+ 	{
+ 		m_instruction = Parallel;
++		m_aluInstruction = _instAlu;
+ 
+ 		const auto& funcMove = g_opcodeFuncs[_instMove];
+ 		const auto& funcAlu = g_opcodeFuncs[_instAlu];
+diff --git a/source/dsp56kEmu/jitops_alu.cpp b/source/dsp56kEmu/jitops_alu.cpp
+--- a/source/dsp56kEmu/jitops_alu.cpp
++++ b/source/dsp56kEmu/jitops_alu.cpp
+@@ -106,6 +106,8 @@
+ 
+ 		if(!m_disableCCRUpdates)
+ 			ccr_dirty(_ab, alu, static_cast<CCRMask>(CCR_E | CCR_N | CCR_U | CCR_Z));
++		else if(smSaturates())
++			alu_saturateSM(alu);	// IF form: no CCR update, the result still saturates (SM)
+ 	}
+ 
+ 	void JitOps::alu_add(const TWord _ab, const uint8_t _v)
+@@ -174,6 +176,8 @@
+ 
+ 		if(!m_disableCCRUpdates)
+ 			ccr_dirty(_ab, alu, static_cast<CCRMask>(CCR_E | CCR_N | CCR_U | CCR_Z));
++		else if(smSaturates())
++			alu_saturateSM(alu);	// IF form: no CCR update, the result still saturates (SM)
+ 	}
+ 
+ 	void JitOps::alu_sub(const TWord _ab, const uint8_t _v)
+diff --git a/source/dsp56kEmu/jitops_ccr.cpp b/source/dsp56kEmu/jitops_ccr.cpp
+--- a/source/dsp56kEmu/jitops_ccr.cpp
++++ b/source/dsp56kEmu/jitops_ccr.cpp
+@@ -1,4 +1,5 @@
+ #include "jitblock.h"
++#include "jitdspmode.h"
+ #include "jitops.h"
+ #include "jitregtypes.h"
+ 
+@@ -12,9 +13,87 @@
+ 		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(_mask));
+ 	}
+ 
+-	void JitOps::ccr_dirty(TWord _aluIndex, const JitReg64& _alu, const CCRMask _dirtyBits)
+-	{
++	bool JitOps::smSaturates() const
++	{
++		const auto* mode = m_block.getMode();
++		if(!mode || !mode->testSR(SRB_SM))
++			return false;
++
++		// DSP56300FM 3.2.3: saturation applies to Data ALU results going to an accumulator, and is always disabled for
++		// TFR, Tcc, DMACsu, DMACuu, MACsu, MACuu, MPYsu, MPYuu, CMPU and the BFU ops. CMP / CMPM / TST write no
++		// accumulator, logical ops do not pass the MAC unit.
++		switch(m_aluInstruction)
++		{
++		case Abs: case ADC:
++		case Add_SD: case Add_xx: case Add_xxxx: case Addl: case Addr:
++		case Asl_D: case Asl_ii: case Asl_S1S2D: case Asr_D: case Asr_ii: case Asr_S1S2D:
++		case Dec: case Inc: case Neg: case Rnd: case Sbc:
++		case Sub_SD: case Sub_xx: case Sub_xxxx: case Subl: case Subr:
++		case Mac_S1S2: case Mac_S: case Maci_xxxx: case Macr_S1S2: case Macr_S: case Macri_xxxx:
++		case Mpy_S1S2D: case Mpy_SD: case Mpyi: case Mpyr_S1S2D: case Mpyr_SD: case Mpyri:
++			return true;
++		case Dmac:
++			return getFieldValue<Dmac, Field_S, Field_s>(m_opWordA) == 0;	// DMACss only
++		default:
++			return false;
++		}
++	}
++
++	void JitOps::alu_saturateSM(const JitReg64& _alu)
++	{
++		// Table 3-1: EXT[7], EXT[0], MSP[23] = accumulator bits 55, 48, 47. 000 / 111: unchanged; EXT[7] = 0:
++		// $00 7FFFFF FFFFFF, EXT[7] = 1: $FF 800000 000000. V and L are set when it saturates (3-10). The C bit is
++		// not affected (5-16). The constants are not scaled (3-10).
++		static_assert(g_leftAlignedAlu, "written for the left-aligned accumulator (bit 55 at host bit 63)");
++
++		const auto done = m_asm.newLabel();
++		const RegGP t(m_block);
++		const RegGP u(m_block);
++
++		m_asm.mov(r64(t), _alu);
++		m_asm.shr(r64(t), asmjit::Imm(47 + g_aluBitOffset));	// [8] = bit 55, [1] = bit 48, [0] = bit 47
++		m_asm.mov(r64(u), asmjit::Imm(0x103));
++		m_asm.and_(r64(t), r64(u));
++		m_asm.test_(r64(t));
++		m_asm.jz(done);
++		m_asm.cmp(r64(t), asmjit::Imm(0x103));
++		m_asm.jz(done);
++
++		// bit 55 set: $FF800000000000 = ~$007FFFFFFFFFFF (left-aligned, low 8 bits clear)
++		m_asm.mov(r64(t), _alu);
++		m_asm.sar(r64(t), asmjit::Imm(63));
++		m_asm.mov(r64(u), asmjit::Imm(0x007FFFFFFFFFFFull << g_aluBitOffset));
++		m_asm.xor_(r64(u), r64(t));
++		m_asm.and_(r64(u), asmjit::Imm(-static_cast<int64_t>(1ll << g_aluBitOffset)));
++		m_asm.mov(_alu, r64(u));
++		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(CCR_V));
++		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(CCR_L));
++
++		m_asm.bind(done);
++	}
++
++	void JitOps::ccr_dirty(TWord _aluIndex, const JitReg64& _alu, CCRMask _dirtyBits)
++	{
++		// SM: V means "saturated" now (5-16: an overflow is a result not representable without the extension), so it
++		// is not left to the lazy 56-bit V update
++		// (IF form, m_disableCCRUpdates: the result still saturates; op_Ifcc puts the CCR back afterwards)
++		const bool smAny = smSaturates();
++		const bool sm = smAny && !m_disableCCRUpdates;
++		if(smAny && !sm)
++			alu_saturateSM(_alu);
++		if(sm)
++			_dirtyBits = static_cast<CCRMask>(_dirtyBits & ~CCR_V);
++
+ 		m_ccrWritten |= _dirtyBits;
++
++		if(sm)
++		{
++			m_ccrWritten |= CCR_V;
++			// pending bits of the previous op first (they read regLastModAlu), then V cleared and set by the saturation
++			updateDirtyCCR(static_cast<CCRMask>(m_ccrDirty & ~_dirtyBits));
++			ccr_clear(CCR_V);
++			alu_saturateSM(_alu);
++		}
+ 
+ 		if constexpr(g_useSRCache)
+ 		{
+diff --git a/source/dsp56kEmu/unittests.h b/source/dsp56kEmu/unittests.h
+--- a/source/dsp56kEmu/unittests.h
++++ b/source/dsp56kEmu/unittests.h
+@@ -98,6 +98,7 @@
+ 		void dec();
+ 		void div();
+ 		void ccrGroundTruth();
++		void arithmeticSaturation();
+ 
+ 		void dmac();
+ 		void dmacMultiPrecision();
+diff --git a/source/dsp56kEmu/unittests.cpp b/source/dsp56kEmu/unittests.cpp
+--- a/source/dsp56kEmu/unittests.cpp
++++ b/source/dsp56kEmu/unittests.cpp
+@@ -84,6 +84,7 @@
+ 	{
+ 		conditionCodes();
+ 		ccrGroundTruth();
++		arithmeticSaturation();
+ 		aguModulo();
+ 		aguMultiWrapModulo();
+ 		aguBitreverse();
+@@ -757,6 +758,58 @@
+ 			verify(dsp.aluA() == 0x00EEDDCCBBAA9A);
+ 			verify(dsp.aluB() == 0x0000aabbccddeeff);
+ 		});
++	}
++
++	void UnitTests::arithmeticSaturation()
++	{
++		// DSP56300FM rev.5 3.2.3 + Table 3-1 (rendered pages 3-9/3-10), SR bit 20 (5-11), V (5-16): with SM set the
++		// result going to the accumulator is checked on bits 55, 48, 47 after rounding: 000 / 111 unchanged, else
++		// $007FFFFFFFFFFF (bit 55 = 0) or $FF800000000000 (bit 55 = 1); V and L set when it saturates. Dropped from the
++		// interpreter by upstream a949e03c (2021) and never in the JIT.
++		auto sat = [&](bool _sm, uint64_t _a, uint64_t _b, const char* _op, uint64_t _expect, bool _v, TWord _raw = 0)
++		{
++			runTest([&]()
++			{
++				dsp.setSR(_sm ? SR_SM : 0);
++				dsp.setALU(false, TReg56(static_cast<TReg56::MyType>(_a)));
++				dsp.setALU(true, TReg56(static_cast<TReg56::MyType>(_b)));
++				dsp.reg.x.var = 0x400000;	// x0 = 0.5
++				dsp.reg.y.var = 0x400000;	// y0 = 0.5
++				if(_raw) emit(_raw); else emit(_op);
++			}, [&]()
++			{
++				if(dsp.aluA().var != _expect || bool(dsp.sr_test(CCR_V)) != _v)
++					std::printf("SM=%d %s a=%014llX b=%014llX: got %014llX V=%d, expected %014llX V=%d\n", int(_sm), _op,
++						static_cast<unsigned long long>(_a), static_cast<unsigned long long>(_b),
++						static_cast<unsigned long long>(dsp.aluA().var), int(bool(dsp.sr_test(CCR_V))),
++						static_cast<unsigned long long>(_expect), int(_v));
++				verify(dsp.aluA().var == _expect);
++				verify(bool(dsp.sr_test(CCR_V)) == _v);
++				if(_v)
++					verify(dsp.sr_test(CCR_L));
++			});
++		};
++		// 001: positive past 48 bits -> $007FFFFFFFFFFF, V
++		sat(true , 0x00400000000000, 0x00400000000000, "add b,a", 0x007fffffffffff, true);
++		sat(false, 0x00400000000000, 0x00400000000000, "add b,a", 0x00800000000000, false);	// SM off: 56 bits, no V
++		// 111: unchanged
++		sat(true , 0xffc00000000000, 0x00400000000000, "sub b,a", 0xff800000000000, false);
++		// 110: negative past 48 bits -> $FF800000000000, V
++		sat(true , 0xff800000000000, 0x00000000000001, "sub b,a", 0xff800000000000, true);
++		// 010: bit 48 alone -> positive saturation
++		sat(true , 0x01000000000000, 0x00000000000000, "add b,a", 0x007fffffffffff, true);
++		// 000 with bits 54..49 set: the table looks at 3 bits only -> unchanged, no V
++		sat(true , 0x7e000000000000, 0x00000000000000, "add b,a", 0x7e000000000000, false);
++		// MAC: $007FFFFFFFFFFF + 0.25 -> saturated
++		// (raw MAC y0,x0,A = 1QQQdk10 with QQQ 101: the test assembler turns "mac" into MACsu, which never saturates)
++		sat(true , 0x007fffffffffff, 0, "mac y0,x0,a", 0x007fffffffffff, true, 0x2000d2);
++		// MACsu is never saturated (3-10 Note): the same sum stays
++		sat(true , 0x007fffffffffff, 0, "macsu x0,y0,a", 0x009fffffffffff, false);
++		// TFR is never saturated (3-10 Note)
++		// (raw TFR B,A = 0JJJd001 with JJJ 000, d 0: the test assembler turns "tfr" into RND)
++		sat(true , 0, 0x00800000000000, "tfr b,a", 0x00800000000000, false, 0x200001);
++
++		dsp.setSR(0);	// SM off again: the tests that follow assume it
+ 	}
+ 
+ 	void UnitTests::add()

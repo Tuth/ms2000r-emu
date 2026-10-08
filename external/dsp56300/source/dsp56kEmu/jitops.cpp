@@ -362,6 +362,7 @@ namespace dsp56k
 	void JitOps::emit(const Instruction _inst, const TWord _op)
 	{
 		m_instruction = _inst;
+		m_aluInstruction = _inst;
 
 		getRegisters(m_writtenRegs, m_readRegs, _inst, _op);
 
@@ -378,6 +379,7 @@ namespace dsp56k
 	void JitOps::emit(const Instruction _instMove, const Instruction _instAlu, const TWord _op)
 	{
 		m_instruction = Parallel;
+		m_aluInstruction = _instAlu;
 
 		const auto& funcMove = g_opcodeFuncs[_instMove];
 		const auto& funcAlu = g_opcodeFuncs[_instAlu];

@@ -15,7 +15,8 @@
 // VST3-2 (2026-09-28): no GUI library in here any more. The panel draws through a Backend (a handful of
 // primitives in pixels, and the mouse state of one interactive rectangle), so the standalone (ImGui,
 // vector_panel_imgui.h) and the plugin editor (JUCE) draw the SAME panel from this one layout.
-// LATCH (Tamas, 2026-09-28): Shift+click on a program key 1-16 or on EXIT keeps that key held down until it is
+// LATCH (Tamas, 2026-09-28; every key since PWR-SW-1 - the service manual's [ON/OFF]+[1..5]/[REC] + Power ON test
+// modes): Shift+click on a key keeps that key held down until it is
 // clicked again - a chord on the pads, or EXIT held while GLOBAL is pressed (demo songs). A mouse has one
 // pointer; a real panel has ten fingers.
 #pragma once
@@ -146,7 +147,7 @@ inline void key(Ctx& c, float cx, float cy, float w, float h, unsigned col, unsi
     const Item it = c.b->item(id, a, b);
     bool& ms = c.io->mouse[col][row];
     bool& lat = c.io->latched[col][row];
-    if (it.active && !ms) lat = (st == kPad || latchable) && it.shift ? !lat : false;   // pressed now
+    if (it.active && !ms) lat = it.shift ? !lat : false; (void)latchable;   // pressed now
     ms = it.active;
     const bool down = ms || lat, hov = it.hovered;
     bool& held = c.io->swHeld[col][row];

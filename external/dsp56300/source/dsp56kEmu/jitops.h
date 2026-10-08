@@ -562,6 +562,11 @@ namespace dsp56k
 		void ccr_clear(CCRMask _mask);
 		void ccr_set(CCRMask _mask);
 		void ccr_dirty(TWord _aluIndex, const JitReg64& _alu, CCRMask _dirtyBits = static_cast<CCRMask>(CCR_E | CCR_U));
+		// Arithmetic Saturation Mode (SR SM, DSP56300FM 3.2.3 / Table 3-1): true when the op being compiled is a Data
+		// ALU arithmetic op whose result goes to an accumulator and the block's mode has SM set (compile time: SM is a
+		// JIT mode bit, so blocks compiled with SM = 0 get no extra code)
+		bool smSaturates() const;
+		void alu_saturateSM(const JitReg64& _alu);
 		void ccr_clearDirty(CCRMask _mask);
 		void updateDirtyCCR();
 		void updateDirtyCCR(CCRMask _whatToUpdate);
@@ -748,6 +753,7 @@ namespace dsp56k
 
 		TWord m_opSize = 0;
 		Instruction m_instruction = InstructionCount;
+		Instruction m_aluInstruction = InstructionCount;	// the ALU half of a parallel op, else m_instruction
 
 		uint32_t m_resultFlags = None;
 		RepMode m_repMode = RepNone;

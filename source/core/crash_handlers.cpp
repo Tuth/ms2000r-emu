@@ -30,6 +30,18 @@ static LONG WINAPI StackOvfVeh(EXCEPTION_POINTERS* ep){
 #endif
 static std::atomic<bool> g_dumping{false};
 
+// 2026-10-08 UNLOAD CRASH: InstallCrashHandlers registers PROCESS-WIDE handlers. In the plugin this module is a DLL
+// (MS2000R_engine.dll) that the host unloads; the vectored handler stayed registered and the next exception anywhere
+// in the host called StackOvfVeh in freed memory - Event Log: faulting module MS2000R_engine.dll_unloaded, offset
+// 0x3a0f0 = the first instruction of StackOvfVeh (VSTHost and Cubase 12 alike). Keep the handles, remove them again.
+#ifdef _WIN32
+static PVOID g_veh = nullptr;
+static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
+static bool g_filterSet = false;
+#endif
+static std::terminate_handler g_prevTerminate = nullptr;
+static bool g_terminateSet = false;
+
 #ifdef _WIN32
 static LONG WINAPI SehFilter(EXCEPTION_POINTERS* ep){
   // 2026-09-26: a stack overflow killed the process without a word. Print where: the faulting RIP and
@@ -76,9 +88,28 @@ void InstallCrashHandlers(const char* dumpDir){
   std::fprintf(stderr, "[CRASH] Installing crash handlers, dump dir: %s\n", g_crashDir);
   
 #ifdef _WIN32
-  AddVectoredExceptionHandler(1, StackOvfVeh);
-  SetUnhandledExceptionFilter(SehFilter);
+  if (!g_veh) g_veh = AddVectoredExceptionHandler(1, StackOvfVeh);
+  if (!g_filterSet) { g_prevFilter = SetUnhandledExceptionFilter(SehFilter); g_filterSet = true; }
   { ULONG g = 64 * 1024; SetThreadStackGuarantee(&g); }   // room for the filter after a stack overflow
 #endif
-  std::set_terminate(TerminateHandler);
+  if (!g_terminateSet) { g_prevTerminate = std::set_terminate(TerminateHandler); g_terminateSet = true; }
 }
+
+void UninstallCrashHandlers(){
+#ifdef _WIN32
+  if (g_veh) { RemoveVectoredExceptionHandler(g_veh); g_veh = nullptr; }
+  if (g_filterSet) {
+    // restore the previous filter only if ours is still the active one; a filter installed after ours is left alone
+    const auto cur = SetUnhandledExceptionFilter(g_prevFilter);
+    if (cur != SehFilter) SetUnhandledExceptionFilter(cur);
+    g_filterSet = false;
+  }
+#endif
+  if (g_terminateSet) {
+    if (std::get_terminate() == TerminateHandler) std::set_terminate(g_prevTerminate);
+    g_terminateSet = false;
+  }
+}
+
+// Static destructors of a DLL run on FreeLibrary, before its code is unmapped: the handlers can never outlive the module.
+namespace { struct CrashHandlerUnloadGuard { ~CrashHandlerUnloadGuard(){ UninstallCrashHandlers(); } } g_crashHandlerUnloadGuard; }

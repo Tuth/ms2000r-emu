@@ -98,6 +98,7 @@ namespace  dsp56k
 		void dec();
 		void div();
 		void ccrGroundTruth();
+		void arithmeticSaturation();
 
 		void dmac();
 		void dmacMultiPrecision();

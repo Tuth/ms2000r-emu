@@ -1,4 +1,4 @@
-# ms2000r-emu  (v0.9.3)
+# ms2000r-emu  (v0.9.4)
 
 A hardware-level emulator of the **KORG MS2000R** (rack version of the MS2000 analog-modeling synthesizer):
 the H8S/2350 main CPU runs the original firmware instruction by instruction, and the DSP56362 runs the
@@ -12,7 +12,12 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
 - The firmware boots and runs: programs, the vocoder, the arpeggiator, the motion/mod sequencer, the demo songs,
   MIDI IN and MIDI OUT (knob moves send CCs), Global and program WRITE (the flash is emulated, non-volatile).
 - Front panel: all 32 knobs, the switch matrix, the LED matrix (as the firmware multiplexes it) and the 16x2 LCD
-  including its custom characters. Shift+click on a program key 1-16 or EXIT keeps it held (chords, EXIT+GLOBAL).
+  including its custom characters. Shift+click on any key keeps it held until clicked again (chords, EXIT+GLOBAL,
+  the service manual's power-on key combinations).
+- Output: the AK4522 DAC's digital filter and the line-output coupling (KOD-A30413), and the POWER/VOLUME pot as the
+  real 10 kOhm linear Master VR loaded by the next stage. At its minimum the pot's switch turns the machine off
+  (dark panel, the flash is kept); turning it up is a cold boot with the held keys down. Plugin Settings can disable
+  the switch, so a DAW fade to 0 keeps the machine running.
 - Audio In 1/2 (vocoder, OSC1 AUDIO IN) through a model of the input stage and the AK4522 codec.
 - .syx: load a bank or program file into the machine and save all 128 programs as .syx (standalone: the buttons
   under the panel; plugin: Settings). The file goes into the emulated MIDI IN and the firmware itself stores it,
@@ -28,8 +33,8 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
   `Contents\Resources\MS2000R_engine.dll`; every instance after the first runs from its own copy of it in
   `%TEMP%\MS2000R_engines` (removed when the host unloads the plugin), so each instance is a separate machine.
 
-Known limits: Windows only; old hosts (VSTHost) can hang when leaving the demo
-songs. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
+Known limits: Windows only. VSTHost stops calling a plugin that sends SysEx to it (e.g. on leaving the demo songs):
+switch off "MIDI OUT SysEx -> host" in the plugin's Settings there. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
 96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
 Next: a preset library page.
 
@@ -51,8 +56,8 @@ machine's memory and `recordings\` are kept there.
 
 | file (in the working folder) | what | required |
 |---|---|---|
-| `flash.bin` | the MS2000R main flash (1 MB, Am29LV800B) | yes |
-| `full FW/boot-362.ms2000.bin` | the DSP56362 boot ROM (768 bytes = 192 words x 4, little endian) | yes (no sound without it) |
+| `flash.bin` | the MS2000R main flash (1 MB, MBM29LV800BA) | yes |
+| `full FW/boot-362.bin` | the DSP56362 boot ROM (768 bytes = 192 words x 4, little endian); the widely shared dump works - its two known bad words are corrected in memory. A corrected `boot-362.ms2000.bin` is used first if present | yes (no sound without it) |
 | `hd44780_a00.bin` | the LCD controller's character generator ROM (4096 bytes) | no (the LCD falls back to text) |
 
 The emulator never writes `flash.bin`: what the firmware writes (WRITE) goes to `ms2000_flash_state.bin` /

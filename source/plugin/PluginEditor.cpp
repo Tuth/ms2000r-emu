@@ -148,19 +148,27 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_mic2.setToggleState(m_proc.mic2, juce::dontSendNotification);
     m_dac20.setToggleState(m_proc.dac20, juce::dontSendNotification);
     m_clock.setToggleState(m_proc.hostClock.load(), juce::dontSendNotification);
-    m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); };
+    m_clock.onClick = [this] { m_proc.hostClock = m_clock.getToggleState(); m_proc.saveGlobalSettings(); };
     m_dspThr.setToggleState(m_proc.dspThread.load(), juce::dontSendNotification);
-    m_dspThr.onClick = [this] { m_proc.dspThread = m_dspThr.getToggleState(); };
+    m_dspThr.onClick = [this] { m_proc.dspThread = m_dspThr.getToggleState(); m_proc.saveGlobalSettings(); };
     m_dspThr.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     addChildComponent(m_dspThr);
     m_follow.setToggleState(m_proc.knobFollow.load(), juce::dontSendNotification);
-    m_follow.onClick = [this] { m_proc.knobFollow = m_follow.getToggleState(); refreshKnobs(); m_dirty = true; };
+    m_follow.onClick = [this] { m_proc.knobFollow = m_follow.getToggleState(); m_proc.saveGlobalSettings(); refreshKnobs(); m_dirty = true; };
     m_follow.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     addChildComponent(m_follow);
     m_transport.setToggleState(m_proc.transportMsgs.load(), juce::dontSendNotification);
-    m_transport.onClick = [this] { m_proc.transportMsgs = m_transport.getToggleState(); };
+    m_transport.onClick = [this] { m_proc.transportMsgs = m_transport.getToggleState(); m_proc.saveGlobalSettings(); };
     m_transport.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     addChildComponent(m_transport);
+    m_sysexOut.setToggleState(m_proc.sysexOut.load(), juce::dontSendNotification);
+    m_sysexOut.onClick = [this] { m_proc.sysexOut = m_sysexOut.getToggleState(); m_proc.saveGlobalSettings(); };
+    m_sysexOut.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_sysexOut);
+    m_powerSw.setToggleState(m_proc.powerSwitch.load(), juce::dontSendNotification);
+    m_powerSw.onClick = [this] { m_proc.powerSwitch = m_powerSw.getToggleState(); m_proc.saveGlobalSettings(); };
+    m_powerSw.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_powerSw);
     // LIBRARY-1
     m_list.setModel(this);
     m_list.setRowHeight(22);
@@ -175,8 +183,8 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
         });
     };
     if (m_proc.libraryPath.isNotEmpty()) loadLibrary(m_proc.libraryPath);
-    m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); };
-    m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); };
+    m_mic2.onClick = [this] { m_proc.mic2 = m_mic2.getToggleState(); m_proc.applyInputStage(); m_proc.saveGlobalSettings(); };
+    m_dac20.onClick = [this] { m_proc.dac20 = m_dac20.getToggleState(); m_proc.applyDac(); m_proc.saveGlobalSettings(); };
     m_syxLoad.onClick = [this] {
         m_chooser = std::make_unique<juce::FileChooser>("Load a .syx into the MS2000R", juce::File(), "*.syx");
         m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this](const juce::FileChooser& fc) {
@@ -194,7 +202,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
         });
     };
     m_homeBtn.onClick = [this] {
-        m_chooser = std::make_unique<juce::FileChooser>("The folder with flash.bin and full FW\\boot-362.ms2000.bin", juce::File(m_proc.homePath()));
+        m_chooser = std::make_unique<juce::FileChooser>("The folder with flash.bin and full FW\\boot-362.bin", juce::File(m_proc.homePath()));
         m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this](const juce::FileChooser& fc) {
             const auto d = fc.getResult();
             if (d.isDirectory()) { m_proc.chooseHome(d); m_dirty = true; }
@@ -213,9 +221,12 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_help, &m_status })
         c->setColour(juce::Label::textColourId, juce::Colour(236, 242, 244)), c->setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
 
+    // UI-SIZE-1: the project's own width, else the user's last width (settings file), else the large default.
+    // Read BEFORE setResizeLimits: that call clamps the empty editor to 700 x 380, resized() stores the 700 in
+    // editorW, and every reopen came up at the minimum (VSTHost: lost on closing the GUI; Cubase: on reload).
+    const int w = m_proc.editorW >= 700 ? m_proc.editorW : m_proc.editorWDefault >= 700 ? m_proc.editorWDefault : 1400;
     setResizable(true, true);
     setResizeLimits(700, 380, 3840, 2160);
-    const int w = m_proc.editorW >= 700 ? m_proc.editorW : 1400;
     setSize(w, int(std::lround(w * VPanel::kH / VPanel::kW)) + kTabH);
     showTab(m_proc.editorTab >= 0 && m_proc.editorTab <= 2 ? m_proc.editorTab : 0);
     if (const char* e = std::getenv("MS2K_EDITORSHOT"); e && *e) { m_shotPath = e; m_testTick = 0; showTab(0); }
@@ -227,6 +238,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
 Ms2kEditor::~Ms2kEditor()
 {
     stopTimer();
+    if (getWidth() >= 700) { m_proc.editorWDefault = getWidth(); m_proc.saveGlobalSettings(); }   // UI-SIZE-1
     if (m_demoPhase) { m_proc.setSwitch(3, 6, false); m_proc.setSwitch(4, 0, false); m_demoPhase = 0; }
     m_io.releaseAll();   // STATED: a key held by the mouse or LATCH is let go when the editor closes
 }
@@ -245,7 +257,7 @@ void Ms2kEditor::showTab(int t)
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
     m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
-    m_transport.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
+    m_transport.setVisible(t == 1); m_sysexOut.setVisible(t == 1); m_powerSw.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
@@ -275,6 +287,8 @@ void Ms2kEditor::resized()
     m_dac20.setBounds(r.removeFromTop(30));
     m_clock.setBounds(r.removeFromTop(30));
     m_transport.setBounds(r.removeFromTop(30));
+    m_sysexOut.setBounds(r.removeFromTop(30));
+    m_powerSw.setBounds(r.removeFromTop(30));
     m_follow.setBounds(r.removeFromTop(30));
     m_dspThr.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
@@ -397,6 +411,11 @@ void Ms2kEditor::timerCallback()
         if (std::memcmp(s.line0, m_lcd.line0, sizeof s.line0) || std::memcmp(s.line1, m_lcd.line1, sizeof s.line1) ||
             std::memcmp(s.cgram, m_lcd.cgram, sizeof s.cgram) || s.displayOn != m_lcd.displayOn) changed = true;
         m_lcd = s;
+    } else if (m_lcd.displayOn || std::any_of(&m_lit[0][0], &m_lit[0][0] + 8 * 12, [](float v) { return v != 0.0f; })) {
+        // PWR-SW-1: no machine (switched off) - the LCD glass and every LED go dark, nothing keeps its last state
+        for (int i = 0; i < 8; ++i) for (int j = 0; j < 12; ++j) m_lit[i][j] = 0.0f;
+        m_lcd.displayOn = false;
+        changed = true;
     }
     if (m_tab == 2) {
         const juce::String ls(m_proc.syx().status());
@@ -470,11 +489,11 @@ void Ms2kEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(20, 22, 26).withAlpha(0.92f)); g.fillRoundedRectangle(r, 3.0f);
         g.setColour(juce::Colour(236, 242, 244)); g.setFont(f); g.drawText(be.tip, r, juce::Justification::centred, false);
     }
-    if (!m_proc.runner()) {   // HOME-1: not powered on - say why and where to fix it, over the panel
+    if (!m_proc.runner() && !m_proc.poweredOff()) {   // HOME-1 (PWR-SW-1: switched off = just a dark panel): not powered on - say why and where to fix it, over the panel
         const auto box = pa.withSizeKeepingCentre(pa.getWidth() * 0.62f, pa.getHeight() * 0.22f);
         g.setColour(juce::Colour(20, 22, 26).withAlpha(0.92f)); g.fillRoundedRectangle(box, 8.0f);
         g.setColour(juce::Colour(236, 242, 244)); g.setFont(juce::Font(juce::jmax(13.0f, pa.getHeight() * 0.024f)));
-        g.drawFittedText(m_proc.status() + "\n\nSettings -> \"Choose the MS2000 folder...\" (the folder with flash.bin and full FW\\boot-362.ms2000.bin).",
+        g.drawFittedText(m_proc.status() + "\n\nSettings -> \"Choose the MS2000 folder...\" (the folder with flash.bin and full FW\\boot-362.bin).",
                          box.reduced(18.0f).toNearestInt(), juce::Justification::centred, 6);
     }
     m_paintMs = juce::Time::getMillisecondCounterHiRes() - t0;
@@ -526,10 +545,21 @@ bool Ms2kEditor::refreshKnobs()
     uint16_t want[4][8]; bool fol[4][8];
     MS2000::programKnobs(prog, m_lit[5][2] > 0.5f ? 1 : 0, want, fol);   // TIMBRE SELECT "2" = LS5.LD02
     const bool held = (m_mouse.btn || juce::Time::getMillisecondCounter() - m_lastMoveMs < 300);
+    // KNOB-FOLLOW-2 (2026-10-08, Tamas: a pot jumps while turned or snaps back to the preset value): the pots
+    // follow the PROGRAM when it comes up; a pot the user has moved since then shows where the user left it,
+    // not the edit buffer read back - the firmware may hold the old value (knob catch, a parameter the page
+    // does not take, its own quantisation), and the read-back pulled the pot away from the hand. A new program
+    // (name or TIMBRE SELECT changes) hands all pots back to the program.
+    {
+        uint64_t id = (m_lit[5][2] > 0.5f) ? 1u : 0u;
+        for (int i = 0; i < 12; ++i) id = id * 131u + prog[i];
+        if (id != m_progId) { m_progId = id; for (auto& row : m_userSet) for (auto& u : row) u = false; }
+        if (m_lastMoved >= 0 && juce::Time::getMillisecondCounter() - m_lastMoveMs < 300) m_userSet[m_lastMoved / 8][m_lastMoved % 8] = true;
+    }
     bool changed = m_io.knobs != m_disp;
     for (int m = 0; m < 4; ++m) for (int x = 0; x < 8; ++x) {
         if (held && m * 8 + x == m_lastMoved) continue;
-        const uint16_t v = fol[m][x] ? want[m][x] : m_proc.knobs[m][x];
+        const uint16_t v = (fol[m][x] && !m_userSet[m][x]) ? want[m][x] : m_proc.knobs[m][x];
         if (v != m_disp[m][x]) { m_disp[m][x] = v; changed = true; }
     }
     m_io.knobs = m_disp;

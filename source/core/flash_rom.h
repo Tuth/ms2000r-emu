@@ -91,6 +91,7 @@ public:
     // dirtySectors(); the runner keeps them across runs in a STATE file beside the ROM
     // (never flash.bin itself - that image stays the sacred dump).
     uint32_t dirtySectors() const { return dirty_; }
+    uint32_t writeGeneration() const { return gen_; }   // DEV-FLASH-1: +1 on every erase / program that changed the array
     // Save the current array + the cumulative sector mask (mask | whatever the file had).
     bool     saveState(const std::string& imagePath, const std::string& maskPath) const;
     // Copy the sectors named in the mask file from the state image into the array.
@@ -111,6 +112,7 @@ private:
     bool     bypassResetArmed_ = false;
     uint16_t failData_ = 0;      // the datum whose program failed (DQ7 = its complement)
     bool     toggle_ = false;    // DQ6 while in PROGRAM_FAILED
+    uint32_t gen_    = 0;        // DEV-FLASH-1
     uint32_t dirty_  = 0;        // BUG126: sectors changed by bus erase/program this run
     uint32_t loaded_ = 0;        // BUG126: sectors taken from the state file at start
 

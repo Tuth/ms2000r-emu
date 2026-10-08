@@ -94,4 +94,62 @@ private:
 // SMUTE is not driven on this board, so nothing else stands between the word and the analog filter.
 inline int32_t ak4522Dac20(int32_t s24) { return s24 & ~int32_t(0xF); }
 
+// ===========================================================================
+// DAC-1 (2026-10-08): THE AK4522 DAC AND THE MS2000 LINE OUTPUT STAGE.
+//   AK4522 datasheet M0020-E-01, RENDERED p.6 "DAC Digital Filter" (fs = 44.1 kHz, DEM0=1/DEM1=0):
+//     passband 0..20.0 kHz at -0.06 dB, -6.0 dB at 22.05 kHz; ripple +-0.06 dB; stopband 24.1 kHz,
+//     43 dB; group delay 14.7/fs. Note 10: the frequencies scale with fs -> 0.4535 fs and fs/2.
+//   p.11 Table 3: DEM1/DEM0 = 0/1 = de-emphasis OFF; soft mute is SMUTE-driven, not driven here (above).
+//   KORG KOD-A30413 (service manual p.16), line output, read on the JPG:
+//     AOUTL/R -> C126/C118 10uF -> Master VR (RK0971221Z05, MVR PCB KLM-2183) -> C134/C117 10uF
+//     -> IC19 + input, R158/R135 22k to the bias (B) -> IC19-A/B x2 (R157/R159, R134/R129 47k/47k,
+//     22pF across the 47k) -> C44/C43 10uF -> R62/R61 100k to ground -> R54/R52 1k -> PH6/PH5.
+// MODELLED:
+//   (1) the digital filter, as it appears at the output rate: only its passband shape lies below fs/2.
+//       A 35-tap linear-phase FIR, minimax-designed: +-0.059 dB to 0.4535 fs, exactly -6.02 dB at fs/2.
+//   (2) the two coupling high-passes whose resistor is on the drawing: 10uF/22k (0.72 Hz) and
+//       10uF/100k (0.16 Hz). Together they take every DC component out of the output - the hardware
+//       cannot pass DC to its jacks, and until now the emulator did.
+// STATED, not read: (a) the FIR delays 17 samples, not 14.7 - a linear-phase filter running at fs
+//   cannot be shorter and meet the ripple (+48 us); (b) C126/C118 into the Master VR is not modelled,
+//   the pot's value is not on the drawing; (c) the jack's external load is not modelled (100k only);
+//   (d) the 22pF/47k pole (154 kHz) and the x2 stage gain belong to the volume/level round, not here;
+//   (e) the FIR output is clamped to the 24-bit range.
+// ===========================================================================
+class Ak4522Dac {
+public:
+    explicit Ak4522Dac(double fs = 48000.0) { setRate(fs); }
+    void setRate(double fs)
+    {
+        m_a1 = hpf(22.0e3 * 10.0e-6, fs);                              // C134/C117 into R158/R135
+        m_a2 = hpf(100.0e3 * 10.0e-6, fs);                             // C44/C43 into R62/R61
+    }
+    void process(int32_t& l, int32_t& r) { l = channel(0, l); r = channel(1, r); }
+private:
+    static constexpr int kTaps = 35, kHalf = 17;
+    static double hpf(double rc, double fs) { return rc / (rc + 1.0 / fs); }   // y = a (y + x - x1)
+    int32_t channel(int c, int32_t s)
+    {
+        static constexpr double h[kHalf + 1] = {
+        0.004930179357, -0.003549788894, 0.004714749311, -0.006035640213, 0.007496955420, -0.009075953980,
+        0.010745321002, -0.012470803149, 0.014213801227, -0.015933185813, 0.017585899444, -0.019127009236,
+        0.020514891070, -0.021711714331, 0.022680324934, -0.023394272761, 0.023830553103, 0.976022086490 };
+        double* x = m_x[c];
+        m_p[c] = (m_p[c] + kTaps - 1) % kTaps;                         // newest sample at m_p
+        x[m_p[c]] = double(s);
+        auto at = [&](int k) { return x[(m_p[c] + k) % kTaps]; };      // k samples ago
+        double y = h[kHalf] * at(kHalf);
+        for (int k = 0; k < kHalf; ++k) y += h[k] * (at(k) + at(kTaps - 1 - k));
+        if (y > 8388607.0) y = 8388607.0; else if (y < -8388608.0) y = -8388608.0;   // STATED (e)
+        double& y1 = m_y1[c]; double& x1 = m_x1[c]; double& y2 = m_y2[c]; double& x2 = m_x2[c];
+        y1 = m_a1 * (y1 + y - x1);  x1 = y;                            // 0.72 Hz
+        y2 = m_a2 * (y2 + y1 - x2); x2 = y1;                           // 0.16 Hz
+        return int32_t(std::lround(y2));
+    }
+    double m_a1 = 0.0, m_a2 = 0.0;
+    double m_x[2][kTaps] = {};
+    int    m_p[2] = {};
+    double m_x1[2] = {}, m_y1[2] = {}, m_x2[2] = {}, m_y2[2] = {};
+};
+
 } // namespace MS2000

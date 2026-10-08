@@ -47,34 +47,70 @@ public:
     uint16_t knobs[4][8];
     float in1 = 1.0f, in2 = 1.0f, volume = 1.0f;
     bool mic2 = false, dac20 = false;
+    int editorWDefault = 0;                              // UI-SIZE-1: the last editor width, a user default (settings file)
     int editorW = 0, editorTab = 0;                      // the editor's last width and page
     std::atomic<bool> hostClock{ true };                 // MIDI-CLOCK: the host tempo as F8 clocks into MIDI IN
     std::atomic<bool> dspThread{ false };                // DSP-THREAD: the DSP on a second core (from the next start)
     std::atomic<bool> knobFollow{ false };               // KNOB-FOLLOW: the pots show the program (off = where you left them)
+    std::atomic<bool> sysexOut{ true };                  // VSTHOST-SYSEX-1: hand the firmware's SysEx OUT to the host
+    std::atomic<bool> powerSwitch{ true };               // PWR-SW-1: the Master VR's switch - POWER off at the minimum
     std::atomic<bool> transportMsgs{ true };             // MIDI-CLOCK b: Start (on a quarter) / Stop with the host transport
     juce::String libraryPath;                            // LIBRARY-1: the .syx the Library page shows
     void setKnob(unsigned mux, unsigned x, uint16_t v);
     void setSwitch(unsigned col, unsigned row, bool down);
     void applyInputStage();
     void applyDac();
-    void applyVolume() { m_gain.store(volume, std::memory_order_relaxed); }
+    // MVR-1: Master VR = ALPS RK0971221Z05 (KOD-A30413; parts list p.23 "W/SW", no value), 10 kOhm LINEAR,
+    // 2 sections, with switch (distributor data sheet, 2026-10-08). Its wiper drives C134/C117 into R158/R135
+    // 22k (at audio frequencies the 10uF is a short), so the divider is loaded:
+    //   g(x) = x*RL / (RL + x*(1-x)*R),  R = 10k, RL = 22k:  g(1) = 1, g(0.5) = -6.96 dB, g(0.25) = -12.75 dB.
+    // PWR-SW-1: its switch section (PSW1/PSW2) breaks the power at the minimum - see powerSwitchPoll().
+    static float masterVrGain(float x)
+    {
+        constexpr double R = 10.0e3, RL = 22.0e3;
+        const double p = x < 0.0f ? 0.0 : x > 1.0f ? 1.0 : double(x);
+        return float(p * RL / (RL + p * (1.0 - p) * R));
+    }
+    void applyVolume() { m_gain.store(masterVrGain(volume), std::memory_order_relaxed); }
     MS2000::SyxTool& syx() { return m_syx; }
+    // SETTINGS-1: the Settings page's switches are also the user's defaults for every NEW instance
+    // (%APPDATA%\MS2000R\MS2000R.settings). A project's own state still overrides them when it is loaded.
+    void loadGlobalSettings();
+    void saveGlobalSettings() const;
     bool chooseHome(const juce::File& dir);     // HOME-1: Settings' folder choice
-    juce::String homePath() const { return m_home.getFullPathName(); }   // SYX-1: .syx import / program export through the machine's MIDI
+    juce::String homePath() const { return m_home.getFullPathName(); }
+    bool poweredOff() const { return m_poweredOff; }   // PWR-SW-1: switched off by the Master VR (message thread)   // SYX-1: .syx import / program export through the machine's MIDI
 
 private:
     void timerCallback() override;           // SYX-1: drives m_syx (message thread)
     MS2000::SyxTool m_syx;
     std::atomic<uint64_t> m_frames{ 0 };
+    std::atomic<uint64_t> m_blocks{ 0 };                 // HOSTDIAG-1: processBlock calls (incl. the silent ones)
+    int m_hostDiagTick = 0;
+    // HOSTDIAG-1: MIDI OUT seen by the host, recorded on the audio thread, printed by the timer (no OutputDebugString
+    // on the audio thread - the first version did that per message and flooded the machine).
+    struct DiagMsg { uint64_t blk; uint8_t len; uint8_t b[7]; };
+    std::array<DiagMsg, 256> m_diagOut{};
+    std::atomic<uint32_t> m_diagOutW{ 0 };
+    uint32_t m_diagOutR = 0;
+    std::array<std::atomic<uint64_t>, 8> m_diagRt{};      // F8..FF counts
     double m_clockTick = 0.0;                // MIDI-CLOCK: where the free-running clock stands (in clocks)
     bool m_wasPlaying = false, m_startPending = false;      // host frames played since the machine started
     int m_syxDiag = 0;
     int m_demoDiag = 0;   // DEMO-FMT-1 diag: MS2K_DEMOAT
+    long m_stormN = -1; int m_stormPad = -1; bool m_stormDown = false; double m_stormWall = 0.0;   // PADSTORM diag
     int m_ramDumps = 0;   // DEMO-FMT-1 diag: MS2K_RAMDUMPAT
     bool bootMachine();                      // once, on the first prepareToPlay
     bool startMachine();                     // the power-on itself (boot and reboot)
     void stopMachine();
     void applyPanel();                       // knobs + input stage + DAC into a running machine
+    void clearStreams();                     // the audio/MIDI queues of a stopped machine
+    // PWR-SW-1: the Master VR at its minimum switches the machine off (flash kept, as on the unit), turning it up
+    // powers it on again - with the keys the panel holds (LATCH) down during the boot. Settings can disable it.
+    bool powerSwitchOpen() const { return powerSwitch.load() && volume <= 0.001f; }
+    void powerSwitchPoll();                  // message thread (timer)
+    bool m_poweredOff = false;
+    bool m_swHeld[8][8] = {};                // what the panel holds down - set again into a fresh machine
     void setStatus(const juce::String& s) { std::lock_guard<std::mutex> l(m_statusMx); m_status = s; }
 
     std::unique_ptr<MS2000::Ms2kRunner> m_runner;
