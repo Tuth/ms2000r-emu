@@ -52,6 +52,33 @@ uint64_t g_ms2kTickWhy[3] = {}, g_ms2kBudgetLog2[32] = {}, g_ms2kBudgetWhoN[32] 
 int g_ms2kBudgetWho = 0;
 static uint64_t g_ms2kOp2Hist[65536] = {};
 static const bool g_ms2kOpHist = [] { const char* e = std::getenv("MS2K_OPHIST"); return e && *e; }();
+// AUDIT-3 (2026-10-09, R2 diagnostic, default off): MS2K_OPCOV=<file> records every instruction SITE the
+// firmware executes (PC -> its bytes, first execution) and APPENDS "pc size bytes" lines to <file> at exit.
+// tools/diffref DIFFREF_SITES=<file> then replays exactly those encodings against the reference / oracle.
+static const char* const g_ms2kOpCovPath = [] { const char* e = std::getenv("MS2K_OPCOV"); return (e && *e) ? e : nullptr; }();
+static const bool g_ms2kOpCov = g_ms2kOpCovPath != nullptr;
+namespace {
+struct OpCov {
+    std::unordered_map<uint32_t, std::array<uint8_t, 12>> site;   // [0] = size, [1..] = bytes
+    void rec(uint32_t pc, const uint8_t* raw, uint32_t size) {
+        if (!raw || size == 0 || size > 10) return;
+        auto it = site.find(pc);
+        if (it != site.end()) return;
+        std::array<uint8_t, 12> a{}; a[0] = uint8_t(size); for (uint32_t i = 0; i < size; ++i) a[1 + i] = raw[i];
+        site.emplace(pc, a);
+    }
+    ~OpCov() {
+        if (!g_ms2kOpCov) return;
+        if (FILE* f = std::fopen(g_ms2kOpCovPath, "a")) {
+            for (auto& s : site) { std::fprintf(f, "%06X %u", unsigned(s.first), unsigned(s.second[0]));
+                for (unsigned i = 0; i < s.second[0]; ++i) std::fprintf(f, " %02X", s.second[1 + i]); std::fprintf(f, "\n"); }
+            std::fclose(f);
+        }
+        std::printf("[OPCOV] %zu instruction sites appended to %s\n", site.size(), g_ms2kOpCovPath);
+    }
+};
+OpCov g_opCov;
+}
 // BUG71: forward declaration - reset() uses this above its definition.
 // It lives in namespace MS2000, like ms2kTpu2Mode() beside it.
 namespace MS2000 { bool ms2kIrqHack(); }
@@ -1100,8 +1127,6 @@ void H8S2350Emulator::step()
     }
     static uint32_t step_50k = 50000;   // PERF-135: a countdown instead of a division per instruction
     static bool irq_masked_logged = false;     // PERF-MCU-8: these four were declared further down; hoisted so the
-    static uint32_t stub_update_counter = 0;   // lean path below shares them with the full one
-    static uint32_t rtc_update_counter = 0;
     static uint32_t diag_counter = 0;
     if (--step_50k == 0) {
         step_50k = 50000;
@@ -1136,13 +1161,10 @@ void H8S2350Emulator::step()
         executeInstructionFast();
         m_cycles_executed++;
         m_stackTaint.currentCycle = m_cycles_executed;
-        if ((++stub_update_counter & 63u) == 0u && m_mp_stub) {
-            m_mp_stub->update(64);
-            if ((++rtc_update_counter & 511u) == 0u) {
-                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                m_mp_stub->updateRTC(static_cast<uint32_t>(seconds - 946684800LL));
-            }
-        }
+        // AUDIT-2: the MP-stub tick (update(64) every 64 instructions, plus an "RTC" fed from the HOST
+        // wall clock - the MS2000 has no RTC) is gone. MS2K_LEGACYIO showed nothing the firmware reads
+        // ever reaches the stub: H'FF60-62 are answered by the P1DR/P2DR/P3DR chokes, and updateSCI()
+        // (its only RX path) runs only in the never-enabled high-speed mode.
         if (m_replay_mode) syncReplay();
         if (m_clock_cycles_per_step > 1) updateClockSystem();
         if (step_count == 1) checkKickStart();
@@ -1192,28 +1214,7 @@ void H8S2350Emulator::step()
     // Update taint tracking cycle counter
     m_stackTaint.currentCycle = m_cycles_executed;
     
-    // Update MP stub (CPU → MP → LCD architecture) — rate-limited like syncDSP()
-    // Every 64 steps to prevent 100× slowdown from inner-loop speedup
-    if ((++stub_update_counter & 63u) == 0u) {  // every 64 steps
-        if (m_mp_stub) {
-            m_mp_stub->update(64); // 64 cycles worth
-            
-            // Update RTC from system clock every ~1 second (64 steps * 64 steps ≈ 4096 steps)
-            // Actually update RTC every 64 stub updates (every ~4096 CPU cycles at 20MHz ≈ 0.2ms)
-            // Better: use a separate counter for RTC
-            if ((++rtc_update_counter & 511u) == 0u) {  // every 512 * 64 steps ≈ 0.2s at 20MHz
-                // Get current system time and convert to seconds since 2000-01-01
-                auto now = std::chrono::system_clock::now();
-                auto duration = now.time_since_epoch();
-                auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
-                // Unix epoch is 1970-01-01, MS2000 epoch is 2000-01-01
-                // Difference: 30 years = 946684800 seconds (including leap years)
-                const int64_t EPOCH_2000_OFFSET = 946684800LL;
-                uint32_t rtc_seconds_since_2000 = static_cast<uint32_t>(seconds - EPOCH_2000_OFFSET);
-                m_mp_stub->updateRTC(rtc_seconds_since_2000);
-            }
-        }
-    }
+    // AUDIT-2: the MP-stub tick was removed here too - see the lean path above.
     // Replay Debugger: Sync replay events with current cycle
     if (m_replay_mode) syncReplay();   // PERF-135: the call only when replaying
 
@@ -1810,6 +1811,7 @@ uint32_t H8S2350Emulator::busInsnStates(uint32_t pc, uint32_t size, uint8_t op0,
         while (m_busRefreshAcc >= m_busRefreshAvail) { m_busRefreshAcc -= m_busRefreshAvail; refresh += m_busRefreshLen; m_busDramOpen = false; }
     }
     if (g_ms2kBusData == 1) { m_bsFetch += fetch; m_bsData += data; m_bsIdle += idle; m_bsRefresh += refresh; }
+    m_busRecLastN = m_busRecN;   // AUDIT-3: kept for lastInsnBusCount() (tools/diffref); the records stay in m_busRec
     m_busRecN = 0;
     return fetch + data + idle + refresh;
 }
@@ -2512,6 +2514,56 @@ void H8S2350Emulator::writeLong(uint32_t address, uint32_t value)
 
 // ==== I/O Register Access (updated based on MAME) ====
 
+// AUDIT-2 (2026-10-09, R2 diagnostic, default off): MS2K_LEGACYIO=1 counts every I/O access that gets
+// PAST the modelled choke points into the legacy switch, and prints the list at process exit. An address
+// listed here is answered by code that no datasheet stands behind.
+namespace {
+struct LegacyIoCensus {
+    bool on = ms2kAnyEnv({ "MS2K_LEGACYIO" });
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> m;   // addr -> (reads, writes)
+    std::unordered_map<uint32_t, uint32_t> pc;                       // addr -> last PC
+    ~LegacyIoCensus() {
+        if (!on) return;
+        std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t>>> v(m.begin(), m.end());
+        std::sort(v.begin(), v.end());
+        printf("[LEGACY-IO] %zu addresses reached the legacy switch\n", v.size());
+        for (auto& e : v) printf("[LEGACY-IO] %06X R=%u W=%u lastPC=%06X\n", unsigned(e.first),
+                                 unsigned(e.second.first), unsigned(e.second.second), unsigned(pc[e.first]));
+        fflush(stdout);
+    }
+};
+LegacyIoCensus g_legacyIo;
+}
+
+// AUDIT-2: what the firmware's MSTPCR / DTCER mean for THIS model. Table 20.3, RENDERED p.729
+// (printed 693): MSTP15 DMAC, 14 DTC, 13 TPU, 11 PPG, 10 D/A, 9 A/D, 6 SCI1, 5 SCI0; bits
+// 12, 8, 7, 4-0 "do not affect operation". The firmware writes H'5D9F at 0x00083E: DMAC, TPU,
+// A/D, SCI0, SCI1 RUN - exactly the modules this emulator models - and DTC, PPG, D/A STOP.
+// That is also why DTCERE = H'40 (DTCEE6 = DMTEND0B, RENDERED p.343 / printed 307) changes
+// nothing: the DTC it would activate is in module stop. Any other combination is a machine
+// this emulator does not model, and it says so once instead of running it silently.
+void H8S2350Emulator::audit2CheckModuleStop()
+{
+    static bool told = false;
+    if (told) return;
+    const unsigned m = (unsigned(m_mstpcr[0]) << 8) | m_mstpcr[1];
+    const unsigned modelledRun  = (1u << 15) | (1u << 13) | (1u << 9) | (1u << 6) | (1u << 5);
+    const unsigned unmodelledRun = (1u << 14) | (1u << 11) | (1u << 10);   // DTC, PPG, D/A
+    bool dtcer = false; for (int i = 0; i < 6; ++i) dtcer |= m_dtcer[i] != 0;
+    const bool stoppedModelled = (m & modelledRun) != 0;
+    const bool runningUnmodelled = (~m & unmodelledRun) != 0;
+    const bool dtcLive = dtcer && !(m & (1u << 14));
+    if (m == 0x3FFFu && !dtcer) return;   // reset state, before the firmware's own write
+    if (stoppedModelled || runningUnmodelled || dtcLive) {
+        told = true;
+        printf("[AUDIT-2] MSTPCR = 0x%04X, DTCER %s at PC=0x%06X - %s%s%s\n", m, dtcer ? "set" : "clear", m_effectivePC,
+               stoppedModelled ? "a modelled module is in module stop (still running here); " : "",
+               runningUnmodelled ? "DTC/PPG/D-A taken out of module stop (NOT modelled); " : "",
+               dtcLive ? "DTC activation enabled with the DTC running (NOT modelled)" : "");
+        fflush(stdout);
+    }
+}
+
 uint8_t H8S2350Emulator::readIORegister(uint32_t address)
 {
     if (!m_inTick) { peripheralsSync(); m_perBudget = 0; }   // PERF-134: the CPU sees the peripherals as they are
@@ -2681,6 +2733,7 @@ uint8_t H8S2350Emulator::readIORegister(uint32_t address)
     }
 
     // BUG78: the census call MOVED TO THE TOP of this function - see the note there.
+    if (g_legacyIo.on) { g_legacyIo.m[address & 0xFFFFFFu].first++; g_legacyIo.pc[address & 0xFFFFFFu] = m_effectivePC; }
 
         // *** FIRMWARE COMMUNICATION FIX: Handle short I/O addressing ***
     // The firmware uses short addressing (0xFF60, 0xFF61) but emulator expects full addressing (0xFF0060, 0xFF0061)
@@ -2922,6 +2975,16 @@ uint8_t H8S2350Emulator::readIORegisterStruct(uint32_t address)
         // PF1 is DSP_SS - the firmware's BCLR/BSET #1 around every DSP transfer are RMWs of it.
         case 0xFF6E: value = m_io_registers.PFDR; break;
         case 0xFF39: value = m_syscr; break;                     // BUG114: SYSCR reads back
+        // AUDIT-2: the latches the write side keeps (see there). ISR used to read 0xFF - "every
+        // IRQ pin has fired" - where the part reads its reset value H'00 (p.134); no IRQ pin is modelled.
+        case 0xFF2C: case 0xFF2D: case 0xFF2E: case 0xFF2F: value = m_irqCtl[offset - 0xFF2C]; break;
+        case 0xFF30: case 0xFF31: case 0xFF32: case 0xFF33: case 0xFF34: case 0xFF35: case 0xFF37:
+            value = m_dtcer[offset - 0xFF30]; break;
+        case 0xFF38: value = m_sbycr; break;
+        case 0xFF3A: value = m_sckcr; break;
+        case 0xFF3C: value = m_mstpcr[0]; break;
+        case 0xFF3D: value = m_mstpcr[1]; break;
+        case 0xFF71: case 0xFF72: case 0xFF73: case 0xFF74: value = m_pcrBE[offset - 0xFF71]; break;
         case 0xFED0: value = m_io_registers.ABWCR; break;   // BUG105: bus controller, read back
         case 0xFED1: value = m_io_registers.ASTCR; break;
         case 0xFED2: value = m_io_registers.WCRH;  break;
@@ -3448,6 +3511,7 @@ void H8S2350Emulator::writeIORegister(uint32_t address, uint8_t value)
     // The LCD is on PORT 2 and is driven from `case 0xFF61` -> writePort2()
     // (BUG44, KOD-A30411 pins 72-79). Nothing else feeds the adapter.
 
+    if (g_legacyIo.on) { g_legacyIo.m[address & 0xFFFFFFu].second++; g_legacyIo.pc[address & 0xFFFFFFu] = m_effectivePC; }
     // *** LCD ADDRESS ALIAS SUPPORT: Handle all LCD address formats ***
     // The firmware uses various address formats for LCD communication
     uint32_t normalized_address = address;
@@ -4159,6 +4223,11 @@ void H8S2350Emulator::adcStep(uint32_t cycles)
     // PANEL-IO: AN4..AN7 are the four HC4051 outputs, their input picked by ADSEL = P17..P15 at this moment.
     if (m_adc_channel >= 4) m_adc_input[m_adc_channel & 0x07u] = m_knob[m_adc_channel - 4][(m_p1dr >> 5) & 7].load(std::memory_order_relaxed);
     m_adc_addr[idx] = uint16_t((m_adc_input[m_adc_channel & 0x07u] & 0x03FFu) << 6);
+    if (g_adcTraceLeft > 0 && double(m_cycles) / 10e6 >= g_adcTraceT0) {   // MS2K_ADCTRACE: the conversions too
+        --g_adcTraceLeft;
+        printf("[ADC-TRACE] t=%.6f conv AN%u = %03X (ADSEL=%u) -> ADDR%c\n", double(m_cycles) / 10e6, unsigned(m_adc_channel),
+               unsigned(m_adc_input[m_adc_channel & 0x07u] & 0x3FFu), unsigned((m_p1dr >> 5) & 7), char('A' + idx));
+    }
 
     const uint8_t last = adcLastChannel();
 
@@ -5014,6 +5083,28 @@ void H8S2350Emulator::writeIORegisterStruct(uint32_t address, uint8_t value)
         case 0xFED7: m_io_registers.DRAMCR = uint8_t((value & ~0x10u) | (m_io_registers.DRAMCR & value & 0x10u)); busConfigUpdate(); break;   // CMF: write 0 to clear
         case 0xFED8: m_io_registers.RTCNT = value; break;
         case 0xFED9: m_io_registers.RTCOR = value; busConfigUpdate(); break;
+        // AUDIT-2 (2026-10-09): eighteen boot-time writes that the default used to DISCARD.
+        // Latches, so the firmware reads back what it wrote. None of them changes what this
+        // emulator does - the guards below say so loudly if the firmware ever asks for
+        // something these latches cannot honour.
+        case 0xFF2C: case 0xFF2D: m_irqCtl[offset - 0xFF2C] = value; break;   // ISCRH/L (p.132)
+        case 0xFF2E:                                                            // IER (p.133)
+            m_irqCtl[2] = value;
+            if (value) { static bool told = false; if (!told) { told = true;
+                printf("[AUDIT-2] IER = 0x%02X at PC=0x%06X - external IRQ pins are NOT modelled\n", value, m_effectivePC); } }
+            break;
+        case 0xFF2F: m_irqCtl[3] &= value; break;   // ISR: "only 0 can be written, to clear the flag" (p.134)
+        case 0xFF30: case 0xFF31: case 0xFF32: case 0xFF33: case 0xFF34: case 0xFF35: case 0xFF37:
+            m_dtcer[offset - 0xFF30] = value; audit2CheckModuleStop(); break;   // DTCERA-F, DTVECR (p.811)
+        case 0xFF38: m_sbycr = value; break;                                    // SBYCR, reset H'08 (p.723)
+        case 0xFF3A:                                                            // SCKCR, reset H'00 (p.725)
+            m_sckcr = value;
+            if (value & 0x07) { static bool told = false; if (!told) { told = true;
+                printf("[AUDIT-2] SCKCR = 0x%02X - medium-speed mode is NOT modelled\n", value); } }
+            break;
+        case 0xFF3C: m_mstpcr[0] = value; break;                                // MSTPCRH (p.690)
+        case 0xFF3D: m_mstpcr[1] = value; audit2CheckModuleStop(); break;       // MSTPCRL - word write ends here
+        case 0xFF71: case 0xFF72: case 0xFF73: case 0xFF74: m_pcrBE[offset - 0xFF71] = value; break;   // PBPCR-PEPCR
         // BUG114, 2026-09-24: SYSCR (H'FF39) was DISCARDED - "[IO-UNMAPPED-WRITE] first write
         // of 0xFFFF39 = 0x21 at PC 0x000834". HM Rev 3.00 section 3.2.2, RENDERED p.109 (printed
         // 73): bits 5-4 INTM1/INTM0 = 1 0 -> interrupt control mode 2, "Control of interrupts
@@ -6289,6 +6380,7 @@ void H8S2350Emulator::executeInstructionFast()
     if (g_ms2kOpHist) m_opcode_hit_count[op0]++;   // PERF-MCU-10: its only readers are MS2K_OPHIST / DIFFREF_HIST
     }
     if (g_ms2kOpHist && m_decodeRaw) ++g_ms2kOp2Hist[uint32_t(op0) << 8 | m_decodeRaw[1]];   // PERF-MCU: 2-byte histogram
+    if (g_ms2kOpCov) g_opCov.rec(pc0 & 0xFFFFFFu, m_decodeRaw, size);                      // AUDIT-3
     m_registers.pc = (pc0 + size) & 0x00FFFFFF;
     const uint64_t cyc0 = m_cycles;
     m_busInExec = g_ms2kBusData != 0; m_busRecN = 0; m_busPc0 = pc0 & 0xFFFFFFu; m_busInsnSize = size;
@@ -6805,6 +6897,7 @@ loopwatch_done:
     m_busInExec = g_ms2kBusData != 0; m_busRecN = 0; m_busPc0 = pc0 & 0xFFFFFFu; m_busInsnSize = insn.size;
     m_insnRaw = m_decodeRaw;                                           // PERF-MCU-1
     m_insnRawOn = m_decodeRaw != nullptr && !g_fifoWatchOn && !g_pcmReadOn && insn.size <= 10u;
+    if (g_ms2kOpCov) g_opCov.rec(pc0 & 0xFFFFFFu, m_decodeRaw, insn.size);   // AUDIT-3
     auto execResult = m_executor.execute(*this, insn, pc0);
     m_busInExec = false;
     m_insnRawOn = false;

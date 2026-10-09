@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(KorgMS2000 VERSION 0.9.5 LANGUAGES CXX)
+project(KorgMS2000 VERSION 0.9.6 LANGUAGES CXX)
 add_compile_definitions(MS2K_VERSION="${PROJECT_VERSION}")   # PUBLIC-1b: shown in the GUI title and the plugin
 
 # Enable testing support for CTest
@@ -393,6 +393,10 @@ target_include_directories(ms2k_ipl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/source)
 add_executable(ipl_e2e EXCLUDE_FROM_ALL source/tests/ipl_e2e.cpp)
 target_include_directories(ipl_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
 target_link_libraries(ipl_e2e ms2000 ms2k_ipl)
+# AUDIT-1 (2026-10-09): the firmware's factory test modes on the emulated machine (LCD / LED / MIDI transcript)
+add_executable(testmode_probe EXCLUDE_FROM_ALL source/tests/testmode_probe.cpp)
+target_include_directories(testmode_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_link_libraries(testmode_probe ms2000)
 # AUDIO-IN round (2026-09-26): the AK4522 ADC model against its datasheet numbers
 add_executable(test_ak4522 source/tests/test_ak4522.cpp)
 target_include_directories(test_ak4522 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/source)

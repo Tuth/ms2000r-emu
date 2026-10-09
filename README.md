@@ -1,4 +1,4 @@
-# ms2000r-emu  (v0.9.5)
+# ms2000r-emu  (v0.9.6)
 
 A hardware-level emulator of the **KORG MS2000R** (rack version of the MS2000 analog-modeling synthesizer):
 the H8S/2350 main CPU runs the original firmware instruction by instruction, and the DSP56362 runs the

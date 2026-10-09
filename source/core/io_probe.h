@@ -75,4 +75,5 @@ public:
     }
     
     static inline void clear() { g_io.clear(); }
+    static inline size_t count() { return g_io.size(); }   // AUDIT-3: diffref site mode - did OUR core touch I/O?
 };

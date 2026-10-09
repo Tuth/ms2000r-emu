@@ -429,6 +429,10 @@ public:
         return readByteBus(address);
     }
     uint8_t readByteBus(uint32_t address);   // everything else: the bus path, unchanged
+    // AUDIT-3 (tools/diffref site mode): the last instruction's off-chip data accesses, as BUS-DATA-STATES recorded them.
+    uint32_t lastInsnBusCount() const { return m_busRecLastN; }   // == 16 (kBusRecMax) means "maybe more"
+    void     clearLastInsnBus() { m_busRecLastN = 0; }   // call before step(): the no-data fast path leaves it alone
+    uint32_t lastInsnBusAddr(uint32_t i) const { return i < m_busRecLastN ? m_busRec[i].a : 0xFFFFFFFFu; }
     uint16_t readWord(uint32_t address);
     uint32_t readLong(uint32_t address);
     void writeByte(uint32_t address, uint8_t value);
@@ -1295,6 +1299,15 @@ private:
     
     // System Control Register (added from MAME)
     uint8_t m_syscr;
+    // AUDIT-2: system registers the firmware writes at boot that used to be DISCARDED by the
+    // legacy switch's default. Appendix B, RENDERED p.847 (printed 811). Latches only.
+    uint8_t m_irqCtl[4]  = { 0, 0, 0, 0 };   // ISCRH, ISCRL, IER, ISR (H'FF2C-FF2F), all reset H'00 (p.132-134)
+    uint8_t m_dtcer[8]   = { 0 };            // DTCERA-F H'FF30-FF35, [7] = DTVECR H'FF37
+    uint8_t m_sbycr      = 0x08;             // H'FF38
+    uint8_t m_sckcr      = 0x00;             // H'FF3A
+    uint8_t m_mstpcr[2]  = { 0x3F, 0xFF };   // MSTPCRH/L H'FF3C-FF3D
+    uint8_t m_pcrBE[4]   = { 0, 0, 0, 0 };   // PBPCR-PEPCR H'FF71-FF74 (MOS pull-ups)
+    void    audit2CheckModuleStop();
     
     // GPIO state tracking (for automatic DDR configuration)
     std::vector<uint8_t> m_ddr_registers;  // Data Direction Registers
@@ -1721,7 +1734,15 @@ private:
     // THE ANALOG SIDE IS NOT MODELLED AND THIS ARRAY IS WHERE THAT IS ADMITTED. Eight
     // 10-bit inputs, all zero = every pot at its minimum, which is a state the hardware
     // can actually be in. It is NOT a reading of a real panel - see the block comment.
-    uint16_t m_adc_input[8]     = {0, 0, 0, 0, 0, 0, 0, 0};
+    // AUDIT-1 (2026-10-09): AN0..AN3 are the rear analog inputs, not "0 on this model". KOD-A30411 p.14: AN0/AN1
+    // pulled to ground by 4.7k on the MS2000R (keyboard model: bender / mod wheel). KOD-A30413 p.16: AN3 = SW_PEDAL
+    // (FOOT SW jack PH1, R8 10k pull-up to +5 V: open = full scale), AN2 = ASS_PEDAL (PEDAL jack PH2, ring normalled to
+    // the 5 V tip feed through R27: no plug = full scale, INFERRED from the jack symbol). Found by the firmware's own
+    // factory test (FtCtrl / FootSW items waited forever at 0). Nothing plugged in = the defaults below.
+    uint16_t m_adc_input[8]     = {0, 0, 0x3FF, 0x3FF, 0, 0, 0, 0};
+public:
+    void setRearAnalog(unsigned an, uint16_t value10) { if (an < 4) m_adc_input[an] = uint16_t(value10 > 1023 ? 1023 : value10); }   // AN0..AN3 (pedal / foot switch)
+private:
     void     adcStep(uint32_t cycles);
     void     adcStartConversion();
     uint64_t adcChannelCycles() const;
@@ -1875,7 +1896,7 @@ private:
     uint32_t busInsnStates(uint32_t pc, uint32_t size, uint8_t op0, uint32_t baseCycles);
     static constexpr uint32_t kBusRecMax = 16;
     struct BusRec { uint32_t a; uint8_t fl; } m_busRec[kBusRecMax] = {};
-    uint32_t m_busRecN = 0, m_busPc0 = 0, m_busInsnSize = 0, m_busLastArea = 0, m_busDramRow = 0, m_busRefreshAcc = 0;
+    uint32_t m_busRecN = 0, m_busRecLastN = 0, m_busPc0 = 0, m_busInsnSize = 0, m_busLastArea = 0, m_busDramRow = 0, m_busRefreshAcc = 0;
     bool     m_busInExec = false, m_busLastExt = false, m_busLastRead = false, m_busLastDram = false, m_busDramOpen = false;
     int      m_busDepth = 0;
     uint64_t m_busRecLost = 0, m_busDataNextPrint = 0;

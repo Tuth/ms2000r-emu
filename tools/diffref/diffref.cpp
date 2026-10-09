@@ -18,6 +18,7 @@
 #include <vector>
 #include "oracle.h"
 #include "movoracle.h"
+#include "../../source/core/io_probe.h"
 
 extern "C" {
 void ref_init(void);
@@ -33,7 +34,7 @@ void ref_acc(int i, unsigned* addr, unsigned* size, unsigned* write, unsigned* v
 using MS2000::H8S2350Emulator;
 extern bool g_h8s_quiet_boot;
 
-static const uint32_t WIN = 0x404000, WINSZ = 0x1000;     // external work RAM window
+static uint32_t WIN = 0x404000, WINSZ = 0x1000;           // external work RAM window (AUDIT-3 sites: all of 0x400000-0x40FFFF)
 static const uint32_t ONC = 0xFFF400, ONCSZ = 0x800;      // on-chip RAM (both cores: plain RAM)
 static const uint32_t CODE = 0x40E000, CODESZ = 16;
 
@@ -263,6 +264,32 @@ int main(int argc, char** argv)
         for (auto& f : byForm) printf("[MOV-FORM] %-24s %8llu tests %8llu bad\n", f.first.c_str(), (unsigned long long)f.second, (unsigned long long)badForm[f.first]);
         return bad ? 1 : 0;
     }
+    // AUDIT-3: DIFFREF_SITES=<file of "pc size bytes" lines from MS2K_OPCOV> - replay exactly the encodings the
+    // firmware executes (deduplicated by bytes), perWord random states each, instead of sweeping first words.
+    std::vector<std::vector<uint8_t>> sites; std::vector<uint32_t> sitePc;
+    if (const char* sf = getenv("DIFFREF_SITES")) {
+        std::map<std::vector<uint8_t>, uint32_t> uniq;
+        if (FILE* f = fopen(sf, "r")) {
+            char line[256];
+            while (fgets(line, sizeof line, f)) {
+                unsigned pc = 0, sz = 0; int n = 0;
+                if (sscanf(line, "%x %u%n", &pc, &sz, &n) < 2 || sz == 0 || sz > 10) continue;
+                std::vector<uint8_t> b; const char* p = line + n; unsigned v; int m;
+                while (b.size() < sz && sscanf(p, "%x%n", &v, &m) == 1) { b.push_back(uint8_t(v)); p += m; }
+                if (b.size() == sz) uniq.emplace(b, pc);
+            }
+            fclose(f);
+        }
+        for (auto& u : uniq) { sites.push_back(u.first); sitePc.push_back(u.second); }
+        WIN = 0x400000; WINSZ = 0x10000;   // the firmware's own work RAM, so its @aa operands stay comparable
+        printf("[SITES] %zu distinct encodings from %s\n", sites.size(), sf);
+        if (sites.empty()) return 2;
+    }
+    const bool siteMode = !sites.empty();
+    std::vector<uint32_t> siteCmp(sites.size()), siteUnk(sites.size()), siteOut(sites.size());
+    // the firmware runs interrupt control MODE 2 (SYSCR = H'21, BUG114): RTE then pops EXR too
+    auto fwMode = [&] { if (siteMode) emu.writeByte(0xFFFF39, 0x21); };
+    fwMode();
     ref_init();
     unsigned char* R = ref_ram();
 
@@ -277,7 +304,9 @@ int main(int argc, char** argv)
     std::map<uint16_t, uint64_t> unknownFirstWords;
     static uint64_t cov[256][4];   // per first byte: tests, refUnknown, refOutside, compared
 
-    for (uint32_t w = w0; w <= w1; ++w) {
+    const uint32_t nOuter = siteMode ? uint32_t(sites.size()) : (w1 - w0 + 1);
+    for (uint32_t oi = 0; oi < nOuter; ++oi) {
+        const uint32_t w = siteMode ? (uint32_t(sites[oi][0]) << 8 | sites[oi][1]) : w0 + oi;
         for (int k = 0; k < perWord; ++k) {
             ++tests; cov[w >> 8][0]++;
             if ((tests & 1023) == 0) fillWin();
@@ -287,14 +316,16 @@ int main(int argc, char** argv)
             // two-word prefixes (01xx, 6A/7C-7F...): give the 2nd word a fair chance to be a real opcode
             if (k & 1) { static const uint8_t p[] = {0x69, 0x6B, 0x6D, 0x6F, 0x78, 0x63, 0x73, 0x67, 0x77, 0x70, 0x72, 0x74, 0x75, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x66, 0x6A, 0x7D, 0x7F, 0x7C, 0x7E, 0x6E, 0x6C, 0x68, 0x10, 0x11, 0x12, 0x13, 0x17, 0x1A, 0x1B, 0x1F, 0x0A, 0x0B, 0x0F, 0x53, 0x51, 0x50, 0x52};
                          code[2] = p[rnd() % sizeof p]; }
+            if (siteMode) for (size_t i = 0; i < sites[oi].size(); ++i) code[i] = sites[oi][i];
             for (uint32_t i = 0; i < CODESZ; ++i) { R[CODE + i] = code[i]; emu.writeByte(CODE + i, code[i]); }
 
             unsigned er[8]; for (int i = 0; i < 7; ++i) er[i] = randReg((rnd() & 1) != 0);
             er[7] = (WIN + 0x800 + (rnd() % 0x400)) & ~1u;
-            const unsigned ccr = rnd() & 0xFF, exr = rnd() & 0x87;
+            if (siteMode) er[7] = (ONC + 0x400 + (rnd() % 0x300)) & ~1u;   // the firmware keeps its stack on chip
+            const unsigned ccr = rnd() & 0xFF, exr = (rnd() & 0x87) | (siteMode ? 0x07u : 0u);   // mode 2: mask 7 = no interrupt inside the test
             ref_set(er, CODE, ccr, exr);
             const int rs = ref_step();
-            if (rs == 0) { ++refUnknown; cov[w >> 8][1]++; unknownFirstWords[uint16_t(w)]++; continue; }
+            if (rs == 0) { if (siteMode) siteUnk[oi]++; ++refUnknown; cov[w >> 8][1]++; unknownFirstWords[uint16_t(w)]++; continue; }
             if (rs < 0) { ++refAbort; continue; }
             bool ok = true;
             for (int i = 0, n = ref_nacc(); i < n && ok; ++i) { unsigned a, s, wr, v; ref_acc(i, &a, &s, &wr, &v); if (!inShared(a, s)) ok = false; }
@@ -303,7 +334,7 @@ int main(int argc, char** argv)
             if (!ok) {   // undo the reference's writes inside the window is unnecessary: it touched something else; resync
                 for (uint32_t i = 0; i < WINSZ; ++i) R[WIN + i] = emu.readByte(WIN + i);
                 for (uint32_t i = 0; i < ONCSZ; ++i) R[ONC + i] = emu.readByte(ONC + i);
-                ++outside; cov[w >> 8][2]++; continue;
+                ++outside; if (siteMode) siteOut[oi]++; cov[w >> 8][2]++; continue;
             }
 
             for (int i = 0; i < 8; ++i) setER(emu, i, er[i]);
@@ -312,8 +343,23 @@ int main(int argc, char** argv)
             emu.setCCRFromByte(uint8_t(ccr));
             auto& f = emu.getFlags(); f.half_carry = (ccr & 0x20) != 0; f.interrupt_mask = (ccr & 0x80) != 0; f.user_bit = (ccr & 0x40) != 0;
             const uint8_t occrPre = uint8_t(ccr);
+            if (siteMode) { IoProbe::enable(); IoProbe::clear(); emu.clearLastInsnBus(); }
             emu.step();
-            ++compared; cov[w >> 8][3]++;
+            if (siteMode && IoProbe::count()) {   // OUR core touched I/O: not comparable, and its peripherals may now
+                ++outside; siteOut[oi]++;           // hold a pending interrupt - start the next test from a clean machine
+                emu.reset(); emu.resume(); fwMode(); fillWin(); continue;
+            }
+            if (siteMode) {   // OUR core read/wrote off-chip memory outside the shared windows (the reference's own
+                bool off = emu.lastInsnBusCount() >= 16;   // log misses some of its reads, so ours decides)
+                for (uint32_t i = 0; i < emu.lastInsnBusCount() && !off; ++i) if (!inShared(emu.lastInsnBusAddr(i), 1)) off = true;
+                if (off) {
+                    ++outside; siteOut[oi]++;
+                    for (uint32_t i = 0; i < WINSZ; ++i) R[WIN + i] = emu.readByte(WIN + i);
+                    for (uint32_t i = 0; i < ONCSZ; ++i) R[ONC + i] = emu.readByte(ONC + i);
+                    continue;
+                }
+            }
+            ++compared; if (siteMode) siteCmp[oi]++; cov[w >> 8][3]++;
 
             std::vector<std::string> what;
             char buf[160];
@@ -345,7 +391,9 @@ int main(int argc, char** argv)
             ++bad;
             if (useOracle) what.insert(what.begin(), "ORACLE");
             std::string ws; for (auto& s : what) { if (!ws.empty()) ws += ","; ws += s; }
-            const uint16_t kw = wordMode ? uint16_t(w) : uint16_t((w & 0xFF00) | (((w >> 8) == 0x01 || (w >> 8) == 0x6A || ((w >> 8) >= 0x7C && (w >> 8) <= 0x7F) || (w >> 8) == 0x17 || (w >> 8) == 0x0A || (w >> 8) == 0x1A || (w >> 8) == 0x0B || (w >> 8) == 0x1B || (w >> 8) == 0x79 || (w >> 8) == 0x7A || (w >> 8) == 0x10 || (w >> 8) == 0x11 || (w >> 8) == 0x12 || (w >> 8) == 0x13) ? (w & 0xF0) : 0));
+            if (siteMode) { ws += "  site"; for (uint8_t b : sites[oi]) { snprintf(buf, sizeof buf, " %02X", b); ws += buf; }
+                            snprintf(buf, sizeof buf, " @%06X", sitePc[oi]); ws += buf; }
+            const uint16_t kw = (wordMode || siteMode) ? uint16_t(w) : uint16_t((w & 0xFF00) | (((w >> 8) == 0x01 || (w >> 8) == 0x6A || ((w >> 8) >= 0x7C && (w >> 8) <= 0x7F) || (w >> 8) == 0x17 || (w >> 8) == 0x0A || (w >> 8) == 0x1A || (w >> 8) == 0x0B || (w >> 8) == 0x1B || (w >> 8) == 0x79 || (w >> 8) == 0x7A || (w >> 8) == 0x10 || (w >> 8) == 0x11 || (w >> 8) == 0x12 || (w >> 8) == 0x13) ? (w & 0xF0) : 0));
             Rec& rec = diffs[{ws, kw}];
             if (rec.n++ < nex) {
                 std::string e;
@@ -361,7 +409,7 @@ int main(int argc, char** argv)
                     snprintf(buf, sizeof buf, "     ref %s%u @%06X = %0*X\n", wr ? "W" : "R", s * 8, a, int(s * 2), v); e += buf; }
                 rec.ex.push_back(e);
             }
-            if (halted) { emu.reset(); emu.resume(); fillWin(); }
+            if (halted) { emu.reset(); emu.resume(); fwMode(); fillWin(); }
         }
     }
     printf("[DIFFREF] tests=%llu compared=%llu differ=%llu refUnknown=%llu refAbort=%llu refOutside=%llu\n",
@@ -370,6 +418,14 @@ int main(int argc, char** argv)
     if (getenv("DIFFREF_COV")) for (int b = 0; b < 256; ++b) if (cov[b][0] && cov[b][3] * 2 < cov[b][0])
         printf("[COV] %02X tests=%llu refUnknown=%llu refOutside=%llu compared=%llu\n", b, (unsigned long long)cov[b][0],
                (unsigned long long)cov[b][1], (unsigned long long)cov[b][2], (unsigned long long)cov[b][3]);
+    if (siteMode) {   // AUDIT-3: the encodings no comparison reached - these are the ones to read on the rendered pages
+        size_t nu = 0;
+        for (size_t i = 0; i < sites.size(); ++i) if (!siteCmp[i]) {
+            ++nu; printf("[UNCOMPARED] %s @%06X:", siteUnk[i] ? "ref-unknown" : "outside    ", sitePc[i]);
+            for (uint8_t b : sites[i]) printf(" %02X", b);
+            printf("\n"); }
+        printf("[SITES] %zu encodings, %zu never compared\n", sites.size(), nu);
+    }
     for (auto& d : diffs) {
         printf("[DIFF] %04X%s %-28s %llu\n", d.first.word, wordMode ? "" : "*", d.first.what.c_str(), (unsigned long long)d.second.n);
         for (auto& e : d.second.ex) printf("%s", e.c_str());
