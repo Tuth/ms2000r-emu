@@ -173,6 +173,11 @@ DSP56362Emulator::~DSP56362Emulator()
     if (m_dsp) {
         printf("[DSP56362] end: %llu ESAI TX frames over %.3f s of MCU time, SHI words in %llu, RX overruns %llu\n",
                (unsigned long long)m_txFrames, double(m_mcuCyclesRun) / 10e6, (unsigned long long)m_wordsIn, (unsigned long long)m_shiOverruns);   // phi = 10 MHz
+        if (const char* e = std::getenv("MS2K_FSPHASELOG"); e && *e == '1') {   // ISSUE3 diagnostic
+            printf("[DSP56362] IRQB edge position in the ESAI frame (DSP cycles after the TX frame, 64-cycle buckets):");
+            for (int i = 0; i < 64; ++i) if (m_phaseHist[i]) printf(" %d:%llu", i * 64, (unsigned long long)m_phaseHist[i]);
+            printf("\n");
+        }
         printf("[DSP56362] non-zero TX words per line, slot0/slot1: TX0 %llu/%llu TX1 %llu/%llu TX2 %llu/%llu "
                "TX3 %llu/%llu TX4 %llu/%llu TX5 %llu/%llu\n",
                m_txNonZero[0][0], m_txNonZero[1][0], m_txNonZero[0][1], m_txNonZero[1][1],
@@ -238,6 +243,12 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
 {
     if (m_dsp) return true;
     m_clockHz = clockHz ? clockHz : 3072000;
+    // ISSUE3 (2026-10-11, diagnostic, default off): MS2K_FSPHASE=<0..1> starts the fs (IRQB) phase that many
+    // fs periods late, so its phase against the ESAI frame can be swept. Not a hardware setting.
+    if (const char* e = std::getenv("MS2K_FSPHASE"); e && *e) {
+        const double f = std::atof(e);
+        if (f > 0.0 && f < 1.0) { m_fsAccum = m_fsShadow = uint64_t(f * 10000000.0); printf("[DSP56362] MS2K_FSPHASE=%.4f (DIAGNOSTIC)\n", f); }
+    }
     // MS2K_DSPSPEED=<factor> (2026-09-26, R2 EXPERIMENT, default off): a faster DSP - EXTAL, and with it the
     // core clock and the ESAI slot period in cycles, times <factor>, so each sample gets that many more
     // DSP cycles. Measures how far the program is from its cycle budget; not a hardware setting.
@@ -374,10 +385,17 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
             f[0] = Audio::RxSlot{ wl, 0, 0, 0 };
             f[1] = Audio::RxSlot{ wr, 0, 0, 0 };
         });
+        // ISSUE3: the IRQB edge at the ESAI frame start - the same fs net on the board (see runForMcuCycles).
+        esai.setTxFrameStartCallback([this] {
+            ++m_esaiFrameStarts;
+            static const bool mcuSource = [] { const char* e = std::getenv("MS2K_IRQBSRC"); return e && std::strcmp(e, "mcu") == 0; }();
+            if (!mcuSource && !m_resetHeld) irqbEdge();
+        });
         if (const char* w = std::getenv("MS2K_DSPWAV"); w && *w) m_wavPath = w;
         if (const char* d = std::getenv("MS2K_DACMODEL"); d && *d == '0') m_dacModelOn = false;   // DAC-1 A/B
         esai.setWriteTxCallback([this](uint64_t& idx, const Audio::TxFrame& f) {
             ++idx; ++m_txFrames;
+            m_lastTxFrameCycle = m_dsp->getCycles();   // ISSUE3: frame-end time for the phase histogram
             for (uint32_t s = 0; s < f.size() && s < 2; ++s)          // which lines carry signal
                 for (uint32_t r = 0; r < 6; ++r) if (f[s][r]) ++m_txNonZero[s][r];
             // BUG128b (2026-09-26): LEFT = SLOT 0, RIGHT = SLOT 1 of TX0, now READ from the parts:
@@ -502,6 +520,30 @@ bool DSP56362Emulator::initialize(uint32_t clockHz, uint32_t /*sampleRate*/)
     return true;
 }
 
+// IRQB = HCT08(FS2, PORT_RESET) on KOD-A30412: after reset, the 48 kHz frame clock fs itself
+// (74HC4040 Q8 of the 12.288 MHz = 256fs crystal). One falling edge per fs period. Korg's
+// program takes it: IPRC = $80082D -> IBL = 01 (enabled, IPL 0), IBL2 = 1 (edge) (UM Figure 4-2,
+// RENDERED p.79), and P:$12 = jsr $3B3. An edge-triggered request is latched once until taken.
+void DSP56362Emulator::irqbEdge()
+{
+    const TWord iprc = m_periphX->read(0xFFFFFF, Nop);
+    const bool enabled = (iprc & 0x18) != 0, edge = (iprc & 0x20) != 0;
+    if (enabled && edge) {
+        if (!m_dsp->hasPendingInterrupt(Vba_IRQB)) m_dsp->injectInterrupt(Vba_IRQB);
+        ++m_irqbEdges;
+        // ISSUE3 (MS2K_FSPHASELOG=1, diagnostic): where in the ESAI frame the IRQB edge lands, in DSP cycles
+        // after the last TX frame callback (frame period ~2083 cycles at 99.98 MHz), 64-cycle buckets.
+        static const bool phaseLog = [] { const char* e = std::getenv("MS2K_FSPHASELOG"); return e && *e == '1'; }();
+        if (phaseLog && m_lastTxFrameCycle) {
+            const uint64_t d = m_dsp->getCycles() - m_lastTxFrameCycle;
+            ++m_phaseHist[d / 64 < 63 ? d / 64 : 63];
+        }
+    } else if (enabled && !m_irqbLevelTold) {
+        m_irqbLevelTold = true;
+        printf("[DSP56362] IRQB enabled LEVEL-triggered (IPRC=%06X) - not modelled, no IRQB delivered\n", iprc);
+    }
+}
+
 void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
 {
     if (!m_dsp || !mcuHz) return;
@@ -584,23 +626,20 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
         return;
     }
 
-    // IRQB = HCT08(FS2, PORT_RESET) on KOD-A30412: after reset, the 48 kHz frame clock fs itself
-    // (74HC4040 Q8 of the 12.288 MHz = 256fs crystal). One falling edge per fs period. Korg's
-    // program takes it: IPRC = $80082D -> IBL = 01 (enabled, IPL 0), IBL2 = 1 (edge) (UM Figure 4-2,
-    // RENDERED p.79), and P:$12 = jsr $3B3. An edge-triggered request is latched once until taken.
-    // STATED: the phase of fs against the ESAI frame (the same fs on the board) is not aligned.
+    // IRQB: see irqbEdge(). ISSUE3 (2026-10-11): FS1 (ESAI FST), FS2 (IRQB) and FS3 (codec LRCK) are the same 74HC4040 Q8 net, so on
+    // the board the IRQB edge IS the ESAI frame start. While the ESAI transmitter runs, the edge is therefore
+    // taken from the ESAI's own frame start (esai.cpp, setTxFrameStartCallback - see the initialisation). This
+    // MCU-timed fs is the fallback only while there is no ESAI frame clock (boot, before Korg's program starts
+    // the ESAI, and after a DSP reset). It used to be the only source, with a phase against the ESAI frame that
+    // depended on the boot - and where that phase fell, the right channel (slot 1) took the sample of the
+    // previous frame part of the time: issue #3. MS2K_IRQBSRC=mcu = the old source (A/B).
     m_fsAccum += uint64_t(mcuCycles) * 48000u;
     while (m_fsAccum >= mcuHz) {
         m_fsAccum -= mcuHz;
-        const TWord iprc = m_periphX->read(0xFFFFFF, Nop);
-        const bool enabled = (iprc & 0x18) != 0, edge = (iprc & 0x20) != 0;
-        if (enabled && edge) {
-            if (!m_dsp->hasPendingInterrupt(Vba_IRQB)) m_dsp->injectInterrupt(Vba_IRQB);
-            ++m_irqbEdges;
-        } else if (enabled && !m_irqbLevelTold) {
-            m_irqbLevelTold = true;
-            printf("[DSP56362] IRQB enabled LEVEL-triggered (IPRC=%06X) - not modelled, no IRQB delivered\n", iprc);
-        }
+        if (m_esaiFrameStarts != m_esaiFrameStartsSeen) { m_esaiFrameStartsSeen = m_esaiFrameStarts; m_fsWithoutFrame = 0; }
+        else if (m_fsWithoutFrame < 2) ++m_fsWithoutFrame;
+        static const bool mcuSource = [] { const char* e = std::getenv("MS2K_IRQBSRC"); return e && std::strcmp(e, "mcu") == 0; }();
+        if (mcuSource || m_esaiFrameStarts == 0 || m_fsWithoutFrame >= 2) irqbEdge();
     }
 
     // MS2K_DSPYWATCH=<hex Y address>: report when that Y word changes (instrument, measurement only).

@@ -1,0 +1,40 @@
+diff --git a/source/dsp56kEmu/esai.cpp b/source/dsp56kEmu/esai.cpp
+index d8fd757..7ad4250 100644
+--- a/source/dsp56kEmu/esai.cpp
++++ b/source/dsp56kEmu/esai.cpp
+@@ -98,7 +98,11 @@ namespace dsp56k
+ 		}
+ 
+ 		if (0 == m_txSlotCounter)
++		{
+ 			m_sr.set(M_TFS);
++			if(m_txFrameStartCallback)
++				m_txFrameStartCallback();
++		}
+ 		else
+ 			m_sr.clear(M_TFS);
+ 
+diff --git a/source/dsp56kEmu/esai.h b/source/dsp56kEmu/esai.h
+index 3cbf4ac..d3a1470 100644
+--- a/source/dsp56kEmu/esai.h
++++ b/source/dsp56kEmu/esai.h
+@@ -368,6 +368,11 @@ namespace dsp56k
+ 
+ 		uint32_t getTxFrameCounter() const { return m_txFrameCounter; }
+ 
++		// MS2000 (issue #3): called at every transmit frame start - the moment slot 0 is transferred and TFS is
++		// set, i.e. the frame sync edge. Boards that derive other signals from the same frame clock (the MS2000
++		// feeds its IRQB from the frame clock) need that edge in the DSP's own time, not in a second clock.
++		void setTxFrameStartCallback(std::function<void()> _callback) { m_txFrameStartCallback = std::move(_callback); }
++
+ 		uint32_t getTxWordCount() const
+ 		{
+ 			return (m_tccr & M_TDC) >> M_TDC0;
+@@ -462,6 +467,7 @@ namespace dsp56k
+ 		uint32_t m_readRX = 0;
+ 		uint32_t m_txSlotCounter = 0;
+ 		uint32_t m_txFrameCounter = 0;
++		std::function<void()> m_txFrameStartCallback;
+ 		uint32_t m_txUnderrunSlots = 0;				// bit per transmit slot that underran when it was last sent
+ 		uint32_t m_rxSlotCounter = 0;
+ 		uint32_t m_rxFrameCounter = 0;
