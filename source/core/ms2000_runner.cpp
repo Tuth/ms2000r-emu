@@ -29,6 +29,12 @@
 // fw25.txt: Global LCD observer for event-driven validation  
 static LcdObserver g_lcdObs;
 
+// LINUX-1: these live in the global namespace (sampling_profiler.cpp, h8s2350_instructions.cpp). A block-scope
+// extern inside namespace MS2000 names MS2000::<name> (C++ [basic.link]); MSVC resolved it globally, GCC does not.
+void ms2k_profiler_start(void*);
+void ms2k_profiler_stop();
+extern bool g_h8s_quiet_boot;
+
 namespace MS2000 {
 
 // LCD Boot Probe instance
@@ -237,7 +243,7 @@ void Ms2kRunner::start() {
     
     postLog("[Runner] Starting execution threads\n");
     m_cpuThread = std::thread(&Ms2kRunner::cpuThreadLoop, this);
-    { extern void ms2k_profiler_start(void*); ms2k_profiler_start(m_cpuThread.native_handle()); }   // PERF-124
+    { ::ms2k_profiler_start(reinterpret_cast<void*>(m_cpuThread.native_handle())); }   // PERF-124
     m_audioThread = std::thread(&Ms2kRunner::audioThreadLoop, this);
     
     // fw18.txt: Start MMCSS audio thread if enabled
@@ -312,7 +318,7 @@ void Ms2kRunner::stop() {
     m_audioEngine.stop();
     
     if (m_audioThread.joinable()) m_audioThread.join();
-    { extern void ms2k_profiler_stop(); ms2k_profiler_stop(); }   // PERF-124
+    { ::ms2k_profiler_stop(); }   // PERF-124
     if (m_cpuThread.joinable()) m_cpuThread.join();
     
     m_cpu.reset();
@@ -709,7 +715,7 @@ void Ms2kRunner::boot_mapAndVBR() {
     // FIX21: Quiet boot - suppress per-instruction verbose trace for fast boot
     m_cpu->setQuietBoot(m_cfg.quietBoot);
     // FIX21b: also arm the file-global printf gate in h8s2350_instructions.cpp
-    { extern bool g_h8s_quiet_boot; g_h8s_quiet_boot = m_cfg.quietBoot; }
+    { ::g_h8s_quiet_boot = m_cfg.quietBoot; }
 
     // FIX5: Read byte callback for 0xA9BC wait loop instrumentation
     // Logs ER2 value at first entry + all memory reads in [0xA9BC, 0xAA10]

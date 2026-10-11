@@ -40,12 +40,26 @@ endif()
 # Platform specific settings
 if(WIN32)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 endif()
 
 # DSP56300 submodule
 add_subdirectory(external/dsp56300 ${CMAKE_CURRENT_BINARY_DIR}/dsp56300)
+
+# LINUX-1: GCC/Clang warnings for this project's own code only. Set after add_subdirectory so the
+# dsp56300 library builds with the flags upstream builds it with (-Wpedantic turns its empty
+# g_nonVolatileXMMs[] - System V has no callee-saved XMM - into an error). And the MSVC keywords
+# the sources use (__forceinline, fopen_s) come from one force-included header, so no source file
+# changes for them.
+if(NOT WIN32)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+endif()
+if(NOT MSVC)
+    add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/source/core/platform_compat.h)
+    # The sources use 256-bit AVX/AVX2 intrinsics (h8s2350_emulator.h, h8s2350_simd_optimizations).
+    # MSVC emits them without a switch; GCC/Clang need the target enabled. Same CPU requirement as
+    # the Windows build.
+    add_compile_options(-mavx2)
+endif()
 
 # Include directories
 include_directories(

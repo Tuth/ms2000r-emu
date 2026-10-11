@@ -44,7 +44,7 @@ Standalone application (Windows, ImGui) with the full MS2000R front panel, and a
   `Contents\Resources\MS2000R_engine.dll`; every instance after the first runs from its own copy of it in
   `%TEMP%\MS2000R_engines` (removed when the host unloads the plugin), so each instance is a separate machine.
 
-Known limits: Windows only. VSTHost stops calling a plugin that sends SysEx to it (e.g. on leaving the demo songs):
+Known limits: Windows only for the GUI and the plugin (Linux: headless build, see below). VSTHost stops calling a plugin that sends SysEx to it (e.g. on leaving the demo songs):
 switch off "MIDI OUT SysEx -> host" in the plugin's Settings there. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
 96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
 Next: a preset library page.
@@ -86,6 +86,21 @@ build\Release\ms2000_emulator.exe --gui
 ```
 
 `dist\MS2000R.bat` and `dist\MS2000R (log).bat` are the launchers to put beside the exe.
+
+## Build (Linux, headless)
+
+The standalone builds headless with GCC 13 or Clang (no GUI, no plugin): CMake 3.16+, Ninja, and the ALSA headers
+(`libasound2-dev`). The CPU needs AVX2, as on Windows.
+
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target ms2000_emulator
+cd <folder with the ROMs> && <repo>/build/ms2000_emulator --headless --selftest-full
+MS2K_MIDIIN="2:C008;2.3:903C64;3.8:803C00" <repo>/build/ms2000_emulator --headless --quiet-boot --duration 6 --render-test out.wav
+```
+
+`MS2K_MIDIIN` schedules MIDI IN bytes at MCU seconds (`t:hex;t:hex`); `--render-test` writes the DSP's frames
+as a 32-bit WAV. `ctest` in the build folder runs the test suite.
 
 VST3 plugin (JUCE is fetched at configure time):
 

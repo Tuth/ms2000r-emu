@@ -1,4 +1,14 @@
 #pragma once
+#ifndef _WIN32
+// LINUX-1: MMCSS is Windows-only; elsewhere the audio thread runs at normal priority.
+#include <chrono>
+#include <thread>
+enum AVRT_PRIORITY { AVRT_PRIORITY_CRITICAL };
+struct MmcssHandle {};
+inline bool enable_mmcss(MmcssHandle&, const wchar_t* = L"Pro Audio", AVRT_PRIORITY = AVRT_PRIORITY_CRITICAL) { return false; }
+inline void disable_mmcss(MmcssHandle&) {}
+inline void Sleep(unsigned ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+#else
 #include <windows.h>
 #include <avrt.h>
 #include <mmsystem.h>
@@ -41,3 +51,4 @@ inline void disable_mmcss(MmcssHandle& h)
     h.timePeriod = false;
   }
 }
+#endif
