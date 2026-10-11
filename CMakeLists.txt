@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(KorgMS2000 VERSION 0.9.6 LANGUAGES CXX)
+project(KorgMS2000 VERSION 0.9.7 LANGUAGES CXX)
 add_compile_definitions(MS2K_VERSION="${PROJECT_VERSION}")   # PUBLIC-1b: shown in the GUI title and the plugin
 
 # Enable testing support for CTest
