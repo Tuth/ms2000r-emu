@@ -92,6 +92,8 @@ namespace MS2000 { bool ms2kModelR(); }    // BUG79 - R2 diagnostic, default OFF
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>   // LINUX-1: access()
 #endif
 
 // 24 bites logikai cím maszkolása

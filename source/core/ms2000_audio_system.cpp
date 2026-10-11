@@ -17,7 +17,7 @@ MS2000AudioSystem::MS2000AudioSystem()
     , m_processedSamples(0)
     , m_audioFrames(0)
     , m_cpuUsage(0.0)
-    , m_lastFrame(std::chrono::high_resolution_clock::now())
+    , m_lastFrame(std::chrono::steady_clock::now())
 {
     // Initialize gain arrays
     std::fill(std::begin(m_inputGains), std::end(m_inputGains), 1.0f);
@@ -113,7 +113,7 @@ bool MS2000AudioSystem::startAudio() {
         m_audioThread = std::thread(&MS2000AudioSystem::audioThreadFunction, this);
         
         m_audioRunning = true;
-        m_lastFrame = std::chrono::high_resolution_clock::now();
+        m_lastFrame = std::chrono::steady_clock::now();
         
         std::cout << "🎵 MS2000 Audio System started" << std::endl;
         return true;
@@ -169,7 +169,7 @@ void MS2000AudioSystem::processAudioFrame() {
     
     // Update statistics
     m_audioFrames++;
-    auto now = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::steady_clock::now();
     auto frameTime = std::chrono::duration_cast<std::chrono::microseconds>(now - m_lastFrame);
     m_lastFrame = now;
     
@@ -509,13 +509,13 @@ void MS2000AudioSystem::audioThreadFunction() {
     const auto frameInterval = std::chrono::microseconds(1000000 / m_config.sampleRate * m_config.bufferSize);
     
     while (m_threadRunning) {
-        auto frameStart = std::chrono::high_resolution_clock::now();
+        auto frameStart = std::chrono::steady_clock::now();
         
         // Process audio frame
         processAudioFrame();
         
         // Wait for next frame
-        auto frameEnd = std::chrono::high_resolution_clock::now();
+        auto frameEnd = std::chrono::steady_clock::now();
         auto frameDuration = frameEnd - frameStart;
         
         if (frameDuration < frameInterval) {

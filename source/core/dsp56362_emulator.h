@@ -263,6 +263,12 @@ private:
     uint32_t m_pendMcu = 0;           // PERF-131: MCU cycles not yet given to the DSP
     uint32_t m_pendHz  = 10000000;    // PERF-131: the MCU clock of the last tickMcu()
     uint64_t m_fsAccum = 0;           // BUG106: fs (48 kHz) phase against MCU cycles
+    uint64_t m_lastTxFrameCycle = 0;  // ISSUE3: DSP cycle of the last ESAI TX frame (diagnostic)
+    uint64_t m_esaiFrameStarts = 0;   // ISSUE3: ESAI TX frame starts (each one is an IRQB edge)
+    uint64_t m_esaiFrameStartsSeen = 0;
+    uint32_t m_fsWithoutFrame = 0;    // ISSUE3: MCU fs periods since the last ESAI frame start (fallback after 2)
+    void irqbEdge();
+    uint64_t m_phaseHist[64] = {};    // ISSUE3: MS2K_FSPHASELOG histogram, 64-cycle buckets
     uint64_t m_irqbEdges = 0;
     uint32_t m_frameIn[64] = {}, m_frameOut[64] = {}, m_frameWordsN = 0;   // MS2K_SHITRACE (64 words: a whole voice template frame)
     bool     m_outFresh = false;

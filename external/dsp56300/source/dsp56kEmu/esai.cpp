@@ -98,7 +98,11 @@ namespace dsp56k
 		}
 
 		if (0 == m_txSlotCounter)
+		{
 			m_sr.set(M_TFS);
+			if(m_txFrameStartCallback)
+				m_txFrameStartCallback();
+		}
 		else
 			m_sr.clear(M_TFS);
 

@@ -8,7 +8,7 @@ namespace MS2000 {
 
 // MS2000ClockSystem Implementation
 MS2000ClockSystem::MS2000ClockSystem() {
-    m_startTime = std::chrono::high_resolution_clock::now();
+    m_startTime = std::chrono::steady_clock::now();
     m_lastFrameTime = m_startTime;
     m_lastBitTime = m_startTime;
 }
@@ -35,7 +35,7 @@ bool MS2000ClockSystem::initialize() {
         m_audioFrameNumber = 0;
         
         // Reset timing state
-        m_startTime = std::chrono::high_resolution_clock::now();
+        m_startTime = std::chrono::steady_clock::now();
         m_lastFrameTime = m_startTime;
         m_lastBitTime = m_startTime;
         
@@ -120,11 +120,11 @@ void MS2000ClockSystem::clockThreadFunction() {
     std::cout << "   Target Audio Rate: " << TARGET_AUDIO_RATE << " Hz" << std::endl;
     std::cout << "   Approach: Generate audio frames, not hardware cycles" << std::endl;
     
-    auto lastAudioFrame = std::chrono::high_resolution_clock::now();
+    auto lastAudioFrame = std::chrono::steady_clock::now();
     const auto audioFramePeriod = std::chrono::microseconds(1000000ULL / TARGET_AUDIO_RATE);
     
     while (m_threadRunning) {
-        auto now = std::chrono::high_resolution_clock::now();
+        auto now = std::chrono::steady_clock::now();
         auto elapsed = now - lastAudioFrame;
         
         // Generate one audio frame
@@ -350,7 +350,7 @@ void MS2000ClockSystem::setAudioFrameCallback(std::function<void(uint32_t)> call
 
 // Helper Methods
 double MS2000ClockSystem::getElapsedTime() const {
-    auto now = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(now - m_startTime).count();
 }
 
@@ -466,7 +466,7 @@ void ClockEventLogger::logEvent(EventType type, uint64_t masterClockCount, uint3
     ClockEvent event;
     event.type = type;
     event.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     event.masterClockCount = masterClockCount;
     event.audioFrameNumber = audioFrameNumber;
     event.clockTime = static_cast<double>(masterClockCount) / MS2000ClockSystem::MASTER_CLOCK_FREQ;
