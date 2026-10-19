@@ -107,6 +107,9 @@ private:
     long m_stormN = -1; int m_stormPad = -1; bool m_stormDown = false; double m_stormWall = 0.0;   // PADSTORM diag
     int m_bankStormPhase = 0; long m_bankStormN = -1; int m_bankStormPad = -1; bool m_bankStormDown = false; int m_bankStormBankUp = 0;   // BANKSTORM diag
     int m_ramDumps = 0;   // DEMO-FMT-1 diag: MS2K_RAMDUMPAT
+    juce::String diagPanel() const;          // STATE-DIAG: the panel in one line
+    std::atomic<int> m_diagPoll{ 0 };        // STATE-DIAG: blocks left in which pollParams' moves are logged
+    bool m_diagFirstBlock = true;
     bool bootMachine();                      // once, on the first prepareToPlay
     bool startMachine();                     // the power-on itself (boot and reboot)
     void stopMachine();
@@ -141,6 +144,13 @@ private:
     bool m_haveProjectFlash = false;
     uint32_t m_projectMask = 0;
     std::vector<uint8_t> m_projectImage;
+    // EDIT-STATE-1: the sound being edited (the EDIT BUFFER, RAM - lost at every power-on) lives in the project too.
+    // A restored one waits until the machine has run a while, then goes in as CURRENT PROGRAM DATA DUMP (m_syx).
+    std::vector<uint8_t> editBuffer() const;            // what the project saves: the machine's, else the one waiting
+    void sendPendingEdit();                              // message thread (timer)
+    mutable std::mutex m_editMx;
+    std::vector<uint8_t> m_pendingEdit;                  // 254 bytes (TABLE 1) or empty
+    std::atomic<uint64_t> m_bootFrame{ 0 };              // m_frames at the last power-on
 
     // 48 kHz (the DSP's fs) -> host rate
     std::vector<float> m_srcL, m_srcR;      // rendered, not yet consumed source frames

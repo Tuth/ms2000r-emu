@@ -20,13 +20,46 @@
 //  - Audio In at any host rate: the inputs are resampled host rate -> 48 kHz (Lagrange), as the output is.
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "core/knob_follow.h"
 #include <cstdlib>
 #include <filesystem>
 #include "core/rom_paths.h"
 #include <cmath>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 namespace {
 std::atomic<bool> g_machineTaken{ false };
+// STATE-DIAG (default OFF): MS2K_STATEDIAG=1, or the file ~/ms2k_statediag.on for a host started from the Finder -
+// what the host does with the project state (Maschine: nothing came back), to ~/ms2k_statediag.log
+bool stateDiagOn()
+{
+    static const bool on = [] {
+        const char* e = std::getenv("MS2K_STATEDIAG");
+        return (e && *e && *e != '0')
+            || juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("ms2k_statediag.on").existsAsFile();
+    }();
+    return on;
+}
+juce::String engineImage()   // which engine copy (shim) this instance runs from
+{
+#ifdef _WIN32
+    return "-";
+#else
+    Dl_info i{};
+    return dladdr(reinterpret_cast<const void*>(&engineImage), &i) && i.dli_fname ? juce::String(i.dli_fname) : juce::String("?");
+#endif
+}
+void stateDiag(const juce::AudioProcessor* p, const juce::String& what)
+{
+    // one file for every engine copy (the temp folder is named after the image: each copy would get its own)
+    static const juce::File f = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("ms2k_statediag.log");
+    f.appendText(juce::Time::getCurrentTime().toString(false, true, true, true) + " [MS2K-STATE] "
+                 + juce::String::toHexString((juce::pointer_sized_int)p) + " "
+                 + juce::AudioProcessor::getWrapperTypeDescription(p->wrapperType) + " " + engineImage().fromLastOccurrenceOf("/", false, false)
+                 + ": " + what + "\n", false, false, "\n");
+}
 std::atomic<int> g_liveProcessors{ 0 };   // MULTI-1: read by the loader module (ms2k_liveProcessors)
 std::atomic<int> g_createdProcessors{ 0 };   // MAC-4: ever constructed here - the AU loader's "handed out and opened"
 
@@ -92,6 +125,17 @@ Ms2kProcessor::Ms2kProcessor()
     m_syx.setSend([this](const uint8_t* p, size_t n) { if (m_runner) m_runner->sendMIDIData(p, n); });
     m_syx.setClock([this] { return double(m_frames.load(std::memory_order_relaxed)) / (m_hostRate > 0 ? m_hostRate : 48000.0); });   // machine time
     startTimerHz(10);
+    if (stateDiagOn()) { stateDiag(this, "constructed, " + diagPanel()); m_diagPoll = 2000; }
+}
+
+juce::String Ms2kProcessor::diagPanel() const
+{
+    juce::String k; int moved = 0;
+    for (int i = 0; i < 32; ++i) { if (knobs[i / 8][i % 8] != 512) ++moved; if (i < 4) k << int(knobs[i / 8][i % 8]) << ","; }
+    return "knobs " + k + ".. (" + juce::String(moved) + " off centre) volume " + juce::String(volume, 3)
+         + " in1 " + juce::String(in1, 3) + " mic2 " + juce::String(int(mic2)) + " flashMask "
+         + juce::String::toHexString(int(m_runner ? m_runner->getEmulator().getFlashROM().stateMask() : m_projectMask)).toUpperCase()
+         + (m_runner ? " (running)" : " (no machine)");
 }
 
 // SYX-1: the .syx tool runs on the message thread. R2 diagnostics (default OFF): MS2K_SYXIMPORT=<file> loads it
@@ -109,6 +153,7 @@ void Ms2kProcessor::timerCallback()
 {
     m_syx.poll();
     powerSwitchPoll();
+    sendPendingEdit();
     // HOSTDIAG-1 (R2, default off): MS2K_HOSTDIAG=1 -> once a second to the debugger output (DebugView): is the
     // host still calling processBlock, does the machine advance, and does render() hand out silence. For the
     // VSTHost-only freeze after Demo -> EXIT (2026-10-08): all threads idle-wait in the dump, no spinner.
@@ -160,6 +205,7 @@ void Ms2kProcessor::timerCallback()
 
 Ms2kProcessor::~Ms2kProcessor()
 {
+    if (stateDiagOn()) stateDiag(this, "destroyed");
     stopTimer();
     stopMachine();
     if (m_owner) g_machineTaken = false;
@@ -253,9 +299,14 @@ void Ms2kProcessor::syncParams()
 void Ms2kProcessor::pollParams(bool live)
 {
     bool stage = false;
+    if (m_diagPoll.load(std::memory_order_relaxed) > 0) m_diagPoll.fetch_sub(1, std::memory_order_relaxed);
     for (int i = 0; i < ms2kparams::kCount; ++i) {
         const float v = m_params[size_t(i)]->getValue();
         if (std::abs(v - m_applied[size_t(i)].load(std::memory_order_relaxed)) <= 1.0e-6f) continue;
+        if (m_diagPoll.load(std::memory_order_relaxed) > 0 && stateDiagOn())
+            stateDiag(this, "pollParams: parameter " + juce::String(i) + " (" + ms2kparams::kParams[i].name + ") "
+                      + juce::String(m_applied[size_t(i)].load(std::memory_order_relaxed), 4) + " -> " + juce::String(v, 4)
+                      + (live ? " (live)" : " (stored)"));
         m_applied[size_t(i)].store(v, std::memory_order_relaxed);
         const auto& d = ms2kparams::kParams[i];
         switch (d.kind) {
@@ -421,6 +472,7 @@ bool Ms2kProcessor::startMachine()
         m_syx.feed(b);
     });
     applyPanel();
+    m_bootFrame = m_frames.load();
     const uint32_t fm = m_runner->getEmulator().getFlashROM().stateMask();
     setStatus("running - " + m_home.getFullPathName() + (m_haveProjectFlash ? "  (flash from the project" : "  (flash from the folder")
               + (fm ? ", sectors " + juce::String::toHexString(int(fm)).toUpperCase() + ")" : ", factory)"));
@@ -438,6 +490,7 @@ void Ms2kProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     m_srcL.clear(); m_srcR.clear();
     for (int ch = 0; ch < 2; ++ch) { m_inInterp[ch].reset(); m_inFifo[ch].clear(); m_inFifo[ch].reserve(size_t(samplesPerBlock) * 2 + 64); }
     m_inTmp.resize(cap);
+    if (stateDiagOn()) stateDiag(this, "prepareToPlay " + juce::String(sampleRate) + " / " + juce::String(samplesPerBlock));
     if (!m_bootTried) bootMachine();
 }
 
@@ -445,6 +498,7 @@ void Ms2kProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
 {
     juce::ScopedNoDenormals noDenormals;
     m_blocks.fetch_add(1, std::memory_order_relaxed);   // HOSTDIAG-1
+    if (m_diagFirstBlock && stateDiagOn()) { m_diagFirstBlock = false; stateDiag(this, "first processBlock, " + diagPanel()); }
     const int N = buffer.getNumSamples();
     std::unique_lock<std::mutex> machine(m_machineMx, std::try_to_lock);   // a reboot holds it: silence
     pollParams(machine.owns_lock() && m_runner);                            // AUTOMATION-1: host automation -> panel
@@ -865,13 +919,18 @@ void Ms2kProcessor::getStateInformation(juce::MemoryBlock& dest)
         }
         t.setProperty("flash", raw.getMemoryBlock(), nullptr);
     }
+    if (const auto eb = editBuffer(); eb.size() == 254) t.setProperty("editBuffer", juce::MemoryBlock(eb.data(), eb.size()), nullptr);
     juce::MemoryOutputStream out(dest, false);
     t.writeToStream(out);
+    if (stateDiagOn()) stateDiag(this, "getStateInformation -> " + juce::String(int(dest.getSize())) + " bytes, " + diagPanel());
 }
 
 void Ms2kProcessor::setStateInformation(const void* data, int size)
 {
     const juce::ValueTree t = juce::ValueTree::readFromData(data, size_t(size));
+    if (stateDiagOn()) stateDiag(this, "setStateInformation " + juce::String(size) + " bytes, type '" + t.getType().toString()
+                                 + "', knobs '" + t.getProperty("knobs").toString().substring(0, 40) + "..', before: " + diagPanel());
+    if (stateDiagOn()) m_diagPoll = 2000;
     if (!t.hasType("MS2000R")) return;
     juce::StringArray k; k.addTokens(t.getProperty("knobs").toString(), ",", "");
     for (int i = 0; i < 32 && i < k.size(); ++i) knobs[i / 8][i % 8] = uint16_t(juce::jlimit(0, 1023, k[i].getIntValue()));
@@ -888,6 +947,13 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     boostDb = juce::jlimit(0, 12, int(t.getProperty("boostDb", boostDb.load())));
     libraryPath = t.getProperty("libraryPath", "").toString();
     syncParams();                                        // AUTOMATION-1: the parameters show this project's panel
+    {   // EDIT-STATE-1
+        std::lock_guard<std::mutex> l(m_editMx);
+        m_pendingEdit.clear();
+        if (const auto* eb = t.getProperty("editBuffer").getBinaryData(); eb && eb->getSize() == 254)
+            m_pendingEdit.assign(static_cast<const uint8_t*>(eb->getData()), static_cast<const uint8_t*>(eb->getData()) + 254);
+    }
+    if (stateDiagOn()) stateDiag(this, "setStateInformation applied: " + diagPanel());
 
     // the flash this project's machine had
     const uint32_t mask = uint32_t(int(t.getProperty("flashMask", 0))) & ((1u << MS2000::FlashROM::NUM_SECTORS) - 1u);
@@ -925,6 +991,39 @@ void Ms2kProcessor::setStateInformation(const void* data, int size)
     } else {
         applyPanel();
     }
+}
+
+// ---- EDIT-STATE-1 ----
+std::vector<uint8_t> Ms2kProcessor::editBuffer() const
+{
+    {
+        std::lock_guard<std::mutex> l(m_editMx);
+        if (!m_pendingEdit.empty()) return m_pendingEdit;   // not in the machine yet: keep the project's
+    }
+    std::vector<uint8_t> eb;
+    if (m_runner) {                                      // read as the editor's KNOB-FOLLOW does
+        eb.resize(254);
+        for (uint32_t i = 0; i < 254; ++i) eb[i] = m_runner->getEmulator().peekExternal(MS2000::kEditBufferAddr + i);
+    }
+    return eb;
+}
+
+// The firmware takes its MIDI IN once it has booted; 5 s of machine time after the power-on (as the SYX-1 diag
+// waits) and nothing else being sent. A machine that is not running keeps it waiting (power off, no folder).
+void Ms2kProcessor::sendPendingEdit()
+{
+    if (!m_runner || m_syx.busy()) return;
+    if (m_frames.load() < m_bootFrame.load() + uint64_t(5.0 * m_hostRate)) return;
+    std::vector<uint8_t> eb;
+    {
+        std::lock_guard<std::mutex> l(m_editMx);
+        if (m_pendingEdit.empty()) return;
+        eb = m_pendingEdit;
+    }
+    if (!m_syx.startProgram(eb, "project")) return;
+    std::lock_guard<std::mutex> l(m_editMx);
+    m_pendingEdit.clear();
+    if (stateDiagOn()) stateDiag(this, "edit buffer from the project sent to the machine");
 }
 
 juce::AudioProcessorEditor* Ms2kProcessor::createEditor() { return new Ms2kEditor(*this); }

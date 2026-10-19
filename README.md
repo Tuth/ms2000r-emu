@@ -5,7 +5,7 @@ the H8S/2350 main CPU runs the original firmware instruction by instruction, and
 original DSP code on the dsp56300 emulator library. Nothing of the synth engine is re-implemented - the sound
 comes from the machine's own code.
 
-Standalone application (Windows and macOS, ImGui) with the full MS2000R front panel, and a VST3 instrument plugin (JUCE; on macOS also an Audio Unit).
+Standalone application (Windows and macOS, ImGui) with the full MS2000R front panel, and a VST3 and CLAP instrument plugin (JUCE; on macOS also an Audio Unit).
 
 ## Status
 
@@ -43,8 +43,10 @@ Standalone application (Windows and macOS, ImGui) with the full MS2000R front pa
 - Several plugin instances in one host: the plugin bundle carries the engine as
   `Contents\Resources\MS2000R_engine.dll`; every instance after the first runs from its own copy of it in
   `%TEMP%\MS2000R_engines` (removed when the host unloads the plugin), so each instance is a separate machine.
+- CLAP: the same plugin (clap-juce-extensions), with the same parameters, state and several instances per host (the
+  engine copies go to `MS2000R_clap_engines` in the temp folder).
 
-Known limits: the GUI and the plugin run on Windows and macOS (VST3, and AU on macOS); Linux has a headless build (see below). VSTHost stops calling a plugin that sends SysEx to it (e.g. on leaving the demo songs):
+Known limits: the GUI and the plugin run on Windows and macOS (VST3 and CLAP, and AU on macOS); Linux has a headless build (see below). VSTHost stops calling a plugin that sends SysEx to it (e.g. on leaving the demo songs):
 switch off "MIDI OUT SysEx -> host" in the plugin's Settings there. The emulator needs a recent CPU - it runs about 2x real time on a current desktop; the plugin runs at
 96 kHz with a 128-sample buffer (measured: 0.62 ms median, 0.96 ms worst per 1.33 ms block after the boot).
 Next: a preset library page.
@@ -56,6 +58,38 @@ Windows builds are on the [Releases](../../releases) page: `ms2000_emulator.exe`
 `MS2000R.bat` (or `MS2000R (log).bat` to get `ms2000_gui.log` for a bug report). Copy `MS2000R.vst3` to your
 VST3 folder (usually `C:\Program Files\Common Files\VST3`); on its first start open Settings -> "Choose the
 MS2000 folder..." and pick the folder with the ROMs (remembered in `%APPDATA%\MS2000R\home.txt`). The Microsoft Visual C++ 2015-2022 x64 runtime is needed.
+
+macOS (Apple Silicon only, arm64) builds are in this repository, in `dist/macOS`: the standalone `MS2000R.app` and the
+plugins `MS2000R.vst3`, `MS2000R.component` (AU) and `MS2000R.clap`, built from the commit that added them (see
+[Build (macOS)](#build-macos) to build your own). Install the plugins with
+
+```
+cp -R dist/macOS/MS2000R.vst3 ~/Library/Audio/Plug-Ins/VST3/
+cp -R dist/macOS/MS2000R.component ~/Library/Audio/Plug-Ins/Components/
+cp -R dist/macOS/MS2000R.clap ~/Library/Audio/Plug-Ins/CLAP/
+```
+
+and put `MS2000R.app` anywhere; the ROM folder is found or asked for as described under Build (macOS).
+
+They are ad-hoc signed, which is bound to this Mac's copy of the files: a download through a browser (quarantine), a
+Finder/iCloud attribute or any changed file makes macOS refuse them ("damaged", or a plugin the host does not list).
+Sign them again locally - no Apple account needed - in the folder that holds them (`dist/macOS`, or each plugin
+folder after installing):
+
+```
+xattr -cr MS2000R.app MS2000R.vst3 MS2000R.component MS2000R.clap
+codesign --force --sign - MS2000R.app
+for b in MS2000R.vst3 MS2000R.component MS2000R.clap; do
+  codesign --force --sign - $b/Contents/Resources/MS2000R_engine   # the engine first: it is code outside Contents/MacOS
+  codesign --force --sign - $b
+done
+codesign -v --deep --strict MS2000R.app MS2000R.vst3 MS2000R.component MS2000R.clap   # silent = all valid
+```
+
+`xattr -cr` removes the quarantine and the attributes codesign refuses ("resource fork, Finder information, or
+similar detritus not allowed"). For the AU, make macOS rescan and check it: `killall -9 AudioComponentRegistrar`, then
+`auval -v aumu Ms2r Msem` (ends with "AU VALIDATION SUCCEEDED"). An ad-hoc signature is for this Mac only; to pass
+the files on to other Macs they need a Developer ID signature and notarization.
 
 ## What you need - NOT included
 
@@ -137,30 +171,34 @@ interface with more than two inputs is listed as stereo pairs ("IN 3-4"), and ma
 permission.
 `-DCMAKE_OSX_ARCHITECTURES=x86_64` builds the x64 version, which runs under Rosetta 2.
 
-The plugin, VST3 and Audio Unit (JUCE is fetched at configure time; the pinned JUCE is patched for the macOS 15+
-SDK, `cmake/macos/juce_patch.cmake`):
+The plugin, VST3, CLAP and Audio Unit (JUCE and clap-juce-extensions are fetched at configure time - CMake 3.21+ for
+the CLAP, `-DMS2K_BUILD_CLAP=OFF` leaves it out; the pinned JUCE is patched for the macOS 15+ SDK,
+`cmake/macos/juce_patch.cmake`):
 
 ```
 cmake -S . -B build_vst.nosync -G Ninja -DCMAKE_BUILD_TYPE=Release -DMS2K_BUILD_VST3=ON
-cmake --build build_vst.nosync --target MS2000R_Shim MS2000R_AUShim
+cmake --build build_vst.nosync --target MS2000R_Shim MS2000R_AUShim MS2000R_ClapShim
 cp -R build_vst.nosync/VST3_multi/MS2000R.vst3 ~/Library/Audio/Plug-Ins/VST3/
 cp -R build_vst.nosync/AU_multi/MS2000R.component ~/Library/Audio/Plug-Ins/Components/
+cp -R build_vst.nosync/CLAP_multi/MS2000R.clap ~/Library/Audio/Plug-Ins/CLAP/
 ```
 
-Both bundles carry a loader module and the engine, as on Windows: every instance after the first runs from its own
+All three bundles carry a loader module and the engine, as on Windows: every instance after the first runs from its own
 copy of the engine in `$TMPDIR`, so several instances in one host are separate machines (AU: Logic, GarageBand).
 They are ad-hoc signed - fine for your own builds; to pass them to other Macs they need a Developer ID signature
 and notarization. The plugin finds the MS2000 folder as on Windows (`MS2K_HOME`, the folder chosen in Settings,
 `~/Documents/MS2000R`, the folders above the plugin).
 
-VST3 plugin (JUCE is fetched at configure time):
+VST3 and CLAP plugin (JUCE and clap-juce-extensions are fetched at configure time):
 
 ```
 cmake -S . -B build_vst -G "Visual Studio 17 2022" -DMS2K_BUILD_VST3=ON
-cmake --build build_vst --config Release --target MS2000R_Shim
+cmake --build build_vst --config Release --target MS2000R_Shim MS2000R_ClapShim
 ```
 
-The finished plugin bundle is `build_vst\VST3_multi\MS2000R.vst3` (the loader module plus the engine).
+The finished plugin bundle is `build_vst\VST3_multi\MS2000R.vst3` (the loader module plus the engine). The CLAP is
+the folder `build_vst\CLAP_multi\MS2000R` (`MS2000R.clap`, the loader module, and `MS2000R_engine.dll` beside it):
+copy the whole folder to `%COMMONPROGRAMFILES%\CLAP`.
 
 The plugin looks for the folder holding `flash.bin` in `MS2K_HOME`, then `Documents\MS2000R`, then the folders
 above the plugin binary.

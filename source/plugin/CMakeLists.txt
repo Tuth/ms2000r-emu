@@ -30,6 +30,13 @@ target_link_libraries(MS2000R_VST PRIVATE ms2000
     juce::juce_audio_utils juce::juce_audio_processors
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
+# MAC-5: MS2000R_VST_CLAP - the same processor and editor as a CLAP (MS2000R.clap in the JUCE artefacts folder)
+if(MS2K_BUILD_CLAP)
+    clap_juce_extensions_plugin(TARGET MS2000R_VST
+        CLAP_ID "io.github.ms2000r-emu.ms2000r"
+        CLAP_FEATURES instrument synthesizer stereo)
+endif()
+
 # A console host that loads the built .vst3 like a DAW does and renders a note through processBlock.
 juce_add_console_app(MS2000R_HostTest PRODUCT_NAME "MS2000R_HostTest")
 juce_generate_juce_header(MS2000R_HostTest)
@@ -109,4 +116,36 @@ elseif(APPLE)
         COMMAND xattr -cr ${MS2K_AU_MULTI}
         COMMAND codesign --force --sign - ${MS2K_AU_MULTI}/Contents/Resources/MS2000R_engine
         COMMAND codesign --force --sign - ${MS2K_AU_MULTI})
+endif()
+
+# MAC-5: several CLAP instances per process, as above (shim/ms2k_clap_shim.cpp). The loader module is the .clap the
+# host loads; the CLAP built by clap-juce-extensions travels with it as the engine.
+# macOS:   build_vst/CLAP_multi/MS2000R.clap (bundle; engine in Contents/Resources/MS2000R_engine)
+# Windows: build_vst/CLAP_multi/MS2000R/MS2000R.clap + MS2000R_engine.dll (install the whole folder)
+if(MS2K_BUILD_CLAP AND (WIN32 OR APPLE))
+    add_library(MS2000R_ClapShim MODULE shim/ms2k_clap_shim.cpp)
+    target_compile_features(MS2000R_ClapShim PRIVATE cxx_std_17)
+    target_link_libraries(MS2000R_ClapShim PRIVATE clap-core)
+    add_dependencies(MS2000R_ClapShim MS2000R_VST_CLAP)
+    if(WIN32)
+        set_target_properties(MS2000R_ClapShim PROPERTIES PREFIX "" OUTPUT_NAME MS2000R SUFFIX .clap)
+        set(MS2K_CLAP_MULTI ${CMAKE_BINARY_DIR}/CLAP_multi/MS2000R)
+        add_custom_command(TARGET MS2000R_ClapShim POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -rf ${MS2K_CLAP_MULTI}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${MS2K_CLAP_MULTI}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:MS2000R_VST_CLAP> ${MS2K_CLAP_MULTI}/MS2000R_engine.dll
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:MS2000R_ClapShim> ${MS2K_CLAP_MULTI}/MS2000R.clap)
+    else()
+        set_target_properties(MS2000R_ClapShim PROPERTIES CXX_VISIBILITY_PRESET hidden PREFIX "" SUFFIX "" OUTPUT_NAME MS2000R_clap_shim)
+        set(MS2K_CLAP_MULTI ${CMAKE_BINARY_DIR}/CLAP_multi/MS2000R.clap)
+        add_custom_command(TARGET MS2000R_ClapShim POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -rf ${MS2K_CLAP_MULTI}
+            COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_BUNDLE_DIR:MS2000R_VST_CLAP> ${MS2K_CLAP_MULTI}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${MS2K_CLAP_MULTI}/Contents/Resources
+            COMMAND ${CMAKE_COMMAND} -E rename ${MS2K_CLAP_MULTI}/Contents/MacOS/MS2000R ${MS2K_CLAP_MULTI}/Contents/Resources/MS2000R_engine
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:MS2000R_ClapShim> ${MS2K_CLAP_MULTI}/Contents/MacOS/MS2000R
+            COMMAND xattr -cr ${MS2K_CLAP_MULTI}
+            COMMAND codesign --force --sign - ${MS2K_CLAP_MULTI}/Contents/Resources/MS2000R_engine
+            COMMAND codesign --force --sign - ${MS2K_CLAP_MULTI})
+    endif()
 endif()

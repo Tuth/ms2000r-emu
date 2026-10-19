@@ -24,10 +24,13 @@
 #else
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <unistd.h>
+#include <cerrno>
 #include <filesystem>
 #endif
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <deque>
@@ -102,14 +105,28 @@ std::wstring tempDir()
     return d;
 }
 
-// copies left behind by a host that did not call ExitDll; a copy still loaded elsewhere cannot be deleted - fine
+bool processAlive(unsigned long pid)
+{
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess(p, &code) && code == STILL_ACTIVE;
+    CloseHandle(p);
+    return alive;
+}
+
+// copies left behind by a process that is gone (engine_<pid>_<n>.dll). Copies of a running process stay: hosts that
+// scan or sandbox plugins load the module in several processes at once, and a copy made but not loaded yet could go.
 void cleanStaleCopies()
 {
     const auto dir = tempDir();
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\engine_*.dll").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
-    do { DeleteFileW((dir + L"\\" + fd.cFileName).c_str()); } while (FindNextFileW(h, &fd));
+    do {
+        const unsigned long pid = std::wcstoul(fd.cFileName + 7, nullptr, 10);
+        if (pid == GetCurrentProcessId() || !processAlive(pid)) DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
 
@@ -154,12 +171,17 @@ PathStr tempDir()
     return d;
 }
 
-// copies left behind by a host that did not call bundleExit
+// copies left behind by a process that is gone (engine_<pid>_<n>). Copies of a running process stay: hosts that scan
+// or sandbox plugins load the module in several processes at once, and a copy made but not dlopen()ed yet could go.
 void cleanStaleCopies()
 {
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(tempDir(), ec))
-        if (e.path().filename().string().rfind("engine_", 0) == 0) std::filesystem::remove(e.path(), ec);
+    for (const auto& e : std::filesystem::directory_iterator(tempDir(), ec)) {
+        const auto name = e.path().filename().string();
+        if (name.rfind("engine_", 0) != 0) continue;
+        const pid_t pid = pid_t(std::strtol(name.c_str() + 7, nullptr, 10));
+        if (pid == getpid() || pid <= 0 || (kill(pid, 0) != 0 && errno == ESRCH)) std::filesystem::remove(e.path(), ec);
+    }
 }
 
 void* symbol(ModuleHandle m, const char* name) { return dlsym(m, name); }

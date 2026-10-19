@@ -1,0 +1,60 @@
+{
+  "Name": "MS2000R",
+  "Version": "0.9.7",
+  "Factory Info": {
+    "Vendor": "MS2000 emulation project",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {
+      "Unicode": true,
+      "Classes Discardable": false,
+      "Component Non Discardable": false,
+    },
+  },
+  "Classes": [
+    {
+      "CID": "ABCDEF019182FAEB4D73656D4D733272",
+      "Category": "Audio Module Class",
+      "Name": "MS2000R",
+      "Vendor": "MS2000 emulation project",
+      "Version": "0.9.7",
+      "SDKVersion": "VST 3.7.8",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF011234ABCD4D73656D4D733272",
+      "Category": "Component Controller Class",
+      "Name": "MS2000R",
+      "Vendor": "MS2000 emulation project",
+      "Version": "0.9.7",
+      "SDKVersion": "VST 3.7.8",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF01C0DEF00D4D73656D4D733272",
+      "Category": "Plugin Compatibility Class",
+      "Name": "MS2000R",
+      "Vendor": "MS2000 emulation project",
+      "Version": "0.9.7",
+      "SDKVersion": "VST 3.7.8",
+      "Class Flags": 0,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+  ],
+}

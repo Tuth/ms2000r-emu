@@ -784,5 +784,12 @@ if(MS2K_BUILD_VST3)
                               GIT_TAG bf39bb3916cf6e5858a53831440eb1e58e5fb095
                               ${MS2K_JUCE_PATCH})
     FetchContent_MakeAvailable(JUCE)
+    # MAC-5: the CLAP version of the same JUCE plugin (free-audio/clap-juce-extensions, CLAP 1.2.7; needs CMake 3.21)
+    option(MS2K_BUILD_CLAP "Also build the MS2000R CLAP plugin (clap-juce-extensions)" ON)
+    if(MS2K_BUILD_CLAP)
+        FetchContent_Declare(clap_juce_extensions GIT_REPOSITORY https://github.com/free-audio/clap-juce-extensions.git
+                                                  GIT_TAG 7adee3a1bd4684d4caa5601100e364abccff4b4d)
+        FetchContent_MakeAvailable(clap_juce_extensions)
+    endif()
     add_subdirectory(source/plugin)
 endif()

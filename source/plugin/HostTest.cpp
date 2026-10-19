@@ -138,10 +138,16 @@ int main(int argc, char** argv)
 
     int rc = 0;
     if (mode == "state") {
+        g_pump = true;                              // EDIT-STATE-1: the edit buffer goes in from the timer
         inst->prepareToPlay(rate, block);
-        juce::AudioBuffer<float> tmp(2, int(3 * rate)); int mo = 0;
-        play(*inst, tmp, 0, int(3 * rate), block, -1, -1, mo);
+        juce::AudioBuffer<float> tmp(2, int(12 * rate)); int mo = 0;
+        play(*inst, tmp, 0, int(8 * rate), block, -1, -1, mo);   // booted: the edit buffer holds the program
         auto a = stateOf(*inst);
+        // EDIT-STATE-1: an edited sound - the program name (TABLE 1 bytes 0-11) changed in the edit buffer
+        juce::MemoryBlock eb;
+        if (const auto* e = a.getProperty("editBuffer").getBinaryData()) eb = *e;
+        if (eb.getSize() == 254) eb.copyFrom("STATE TEST  ", 0, 12);
+        a.setProperty("editBuffer", eb, nullptr);
         a.setProperty("knobs", "100,200,300,400,500,600,700,800,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,512,1000", nullptr);
         a.setProperty("mic2", true, nullptr); a.setProperty("editorW", 1234, nullptr);
         std::cout << "A: " << flashOf(a) << "\n";
@@ -150,11 +156,15 @@ int main(int argc, char** argv)
         if (!inst) return 3;
         setState(*inst, a);                         // before prepareToPlay: a project being opened
         inst->prepareToPlay(rate, block);
-        play(*inst, tmp, 0, int(3 * rate), block, -1, -1, mo);
+        play(*inst, tmp, 0, int(12 * rate), block, -1, -1, mo);   // 5 s, then the dump into the edit buffer
         const auto b = stateOf(*inst);
         std::cout << "B: " << flashOf(b) << "\n";
+        const auto* ebB = b.getProperty("editBuffer").getBinaryData();
+        const bool sameEdit = eb.getSize() == 254 && ebB && *ebB == eb;
+        std::cout << "edit buffer: " << (eb.getSize() == 254 ? "A saved" : "A MISSING") << ", "
+                  << (sameEdit ? "B the same (the machine took it)" : "B DIFFERENT") << "\n";
         const bool same = flashOf(a) == flashOf(b) && a.getProperty("knobs") == b.getProperty("knobs")
-                       && bool(b.getProperty("mic2")) && int(b.getProperty("editorW")) == 1234;
+                       && bool(b.getProperty("mic2")) && int(b.getProperty("editorW")) == 1234 && sameEdit;
         std::cout << "state round trip: " << (same ? "SAME" : "DIFFERENT") << "\n";
         if (!same) rc = 5;
         secs = 0;

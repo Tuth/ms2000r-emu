@@ -13,8 +13,10 @@
 // Copies stay loaded for the life of the process; stale copy files are removed on the next first load.
 #include <AudioToolbox/AudioToolbox.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -63,12 +65,17 @@ std::string tempDir()
     return d;
 }
 
-// copies left behind by an earlier process (a file still mapped by another process stays valid when unlinked)
+// copies left behind by a process that is gone (engine_<pid>_<n>). Copies of a running process stay: hosts that scan
+// or sandbox plugins load the component in several processes at once, and a copy made but not dlopen()ed yet could go.
 void cleanStaleCopies()
 {
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(tempDir(), ec))
-        if (e.path().filename().string().rfind("engine_", 0) == 0) std::filesystem::remove(e.path(), ec);
+    for (const auto& e : std::filesystem::directory_iterator(tempDir(), ec)) {
+        const auto name = e.path().filename().string();
+        if (name.rfind("engine_", 0) != 0) continue;
+        const pid_t pid = pid_t(std::strtol(name.c_str() + 7, nullptr, 10));
+        if (pid == getpid() || pid <= 0 || (kill(pid, 0) != 0 && errno == ESRCH)) std::filesystem::remove(e.path(), ec);
+    }
 }
 
 bool loadCopy(EngineCopy& c)

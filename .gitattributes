@@ -1,0 +1,2 @@
+# MAC-6: the signed macOS bundles in dist/macOS - stored byte for byte (a line-ending conversion breaks their signatures)
+dist/macOS/** binary
