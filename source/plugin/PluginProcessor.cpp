@@ -427,9 +427,23 @@ bool Ms2kProcessor::startMachine()
     return true;
 }
 
+// LATENCY-1: note-on to first audible sample, measured with MS2000R_HostTest (note at 4.0 s, first sample over
+// 1e-3 FS): 22.8 ms at 48 kHz / 128 frames, 19.8 ms at 48 kHz / 512, 19.2 ms at 44.1 kHz / 128. The spread is the
+// firmware's 1 ms tick and block alignment. Reported as the middle of that range, in host samples, so a host
+// lines the synth up on the timeline (delay compensation) as it would a hardware unit.
+void Ms2kProcessor::applyLatency()
+{
+    static constexpr double kLatencySeconds = 0.021;
+    const int samples = latencyReport.load() ? int(std::lround(kLatencySeconds * m_hostRate)) : 0;
+    if (samples == getLatencySamples()) return;
+    setLatencySamples(samples);
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withLatencyChanged(true));
+}
+
 void Ms2kProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     m_hostRate = sampleRate > 0 ? sampleRate : 48000.0;
+    applyLatency();
     const size_t cap = size_t(std::ceil(double(samplesPerBlock) * 48000.0 / m_hostRate)) + 64;
     m_srcL.reserve(cap * 2); m_srcR.reserve(cap * 2);
     m_tmpL.resize(cap); m_tmpR.resize(cap); m_tmpFlags.resize(cap);
@@ -810,6 +824,7 @@ void Ms2kProcessor::loadGlobalSettings()
     sysexOut = p.getBoolValue("sysexOut", sysexOut.load());
     powerSwitch = p.getBoolValue("powerSwitch", powerSwitch.load());
     boostDb = juce::jlimit(0, 12, p.getIntValue("boostDb", boostDb.load()));
+    latencyReport = p.getBoolValue("latencyReport", latencyReport.load());
     editorWDefault = p.getIntValue("editorW", 0);
 }
 
@@ -825,6 +840,7 @@ void Ms2kProcessor::saveGlobalSettings() const
     p.setValue("sysexOut", sysexOut.load());
     p.setValue("powerSwitch", powerSwitch.load());
     p.setValue("boostDb", boostDb.load());
+    p.setValue("latencyReport", latencyReport.load());
     if (editorWDefault >= 700) p.setValue("editorW", editorWDefault);
     p.saveIfNeeded();
 }

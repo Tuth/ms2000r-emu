@@ -57,6 +57,8 @@ public:
     std::atomic<bool> knobFollow{ false };               // KNOB-FOLLOW: the pots show the program (off = where you left them)
     std::atomic<bool> sysexOut{ true };                  // VSTHOST-SYSEX-1: hand the firmware's SysEx OUT to the host
     std::atomic<bool> powerSwitch{ true };               // PWR-SW-1: the Master VR's switch - POWER off at the minimum
+    std::atomic<bool> latencyReport{ true };             // Settings: report the synth's latency to the host
+    void applyLatency();                                 // setLatencySamples + tell the host
     std::atomic<int> boostDb{ 0 };                       // OUT-BOOST-1: master output boost after the pot, 0..12 dB
     std::atomic<bool> transportMsgs{ true };             // MIDI-CLOCK b: Start (on a quarter) / Stop with the host transport
     juce::String libraryPath;                            // LIBRARY-1: the .syx the Library page shows

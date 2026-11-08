@@ -139,6 +139,7 @@ int main(int argc, char** argv)
     int rc = 0;
     if (mode == "state") {
         inst->prepareToPlay(rate, block);
+        std::cerr << "latency " << inst->getLatencySamples() << " samples at " << rate << " Hz\n";
         juce::AudioBuffer<float> tmp(2, int(3 * rate)); int mo = 0;
         play(*inst, tmp, 0, int(3 * rate), block, -1, -1, mo);
         auto a = stateOf(*inst);

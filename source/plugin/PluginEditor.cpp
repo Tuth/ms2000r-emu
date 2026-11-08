@@ -158,6 +158,10 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     m_dspThr.onClick = [this] { m_proc.dspThread = m_dspThr.getToggleState(); m_proc.saveGlobalSettings(); };
     m_dspThr.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
     addChildComponent(m_dspThr);
+    m_latency.setToggleState(m_proc.latencyReport.load(), juce::dontSendNotification);
+    m_latency.onClick = [this] { m_proc.latencyReport = m_latency.getToggleState(); m_proc.applyLatency(); m_proc.saveGlobalSettings(); };
+    m_latency.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
+    addChildComponent(m_latency);
     m_follow.setToggleState(m_proc.knobFollow.load(), juce::dontSendNotification);
     m_follow.onClick = [this] { m_proc.knobFollow = m_follow.getToggleState(); m_proc.saveGlobalSettings(); refreshKnobs(); m_dirty = true; };
     m_follow.setColour(juce::ToggleButton::textColourId, juce::Colour(236, 242, 244));
@@ -274,7 +278,7 @@ void Ms2kEditor::showTab(int t)
     m_tabPanel.setToggleState(t == 0, juce::dontSendNotification);
     m_tabSettings.setToggleState(t == 1, juce::dontSendNotification);
     m_tabLibrary.setToggleState(t == 2, juce::dontSendNotification);
-    m_transport.setVisible(t == 1); m_sysexOut.setVisible(t == 1); m_powerSw.setVisible(t == 1); m_boost.setVisible(t == 1); m_boostLbl.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1);
+    m_transport.setVisible(t == 1); m_sysexOut.setVisible(t == 1); m_powerSw.setVisible(t == 1); m_boost.setVisible(t == 1); m_boostLbl.setVisible(t == 1); m_follow.setVisible(t == 1); m_dspThr.setVisible(t == 1); m_latency.setVisible(t == 1);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_libOpen, &m_list, &m_libFile, &m_libStatus }) c->setVisible(t == 2);
     for (auto* c : std::initializer_list<juce::Component*>{ &m_mic2, &m_dac20, &m_clock, &m_demo, &m_syxLoad, &m_syxSave, &m_syxStatus, &m_homeBtn, &m_help, &m_status }) c->setVisible(t == 1);
     if (t != 0) { m_io.releaseAll(); m_mouse.active.clear(); }
@@ -307,6 +311,7 @@ void Ms2kEditor::resized()
     m_sysexOut.setBounds(r.removeFromTop(30));
     m_powerSw.setBounds(r.removeFromTop(30));
     { auto row = r.removeFromTop(30); m_boost.setBounds(row.removeFromLeft(260)); m_boostLbl.setBounds(row); }
+    m_latency.setBounds(r.removeFromTop(30));
     m_follow.setBounds(r.removeFromTop(30));
     m_dspThr.setBounds(r.removeFromTop(30));
     r.removeFromTop(10);
