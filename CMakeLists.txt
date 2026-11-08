@@ -229,6 +229,35 @@ elseif(APPLE)
     endif()
 endif()
 
+# PGO-1: whole-program optimisation for the DSP library too (its peripherals, DMA, interrupt and ESAI clock
+# code is ~20 % of the steady-state profile), and profile-guided optimisation as an opt-in.
+#   MS2K_DSP_LTCG=ON   dsp56kEmu compiled with /GL (Release)
+#   MS2K_PGO=GEN       instrumented build (/GENPROFILE); run the training, the .pgc land beside the .pgd
+#   MS2K_PGO=USE       optimised with the trained profile (/USEPROFILE); OFF (default) = no PGO
+#   MS2K_PGO_DIR       where the .pgd files live (default <build>/pgo)
+option(MS2K_DSP_LTCG "Compile dsp56kEmu with /GL (Release, MSVC)" OFF)
+set(MS2K_PGO "OFF" CACHE STRING "Profile-guided optimisation (MSVC Release): OFF, GEN or USE")
+set_property(CACHE MS2K_PGO PROPERTY STRINGS OFF GEN USE)
+set(MS2K_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Folder of the PGO .pgd/.pgc files")
+if(MSVC AND (MS2K_DSP_LTCG OR NOT MS2K_PGO STREQUAL "OFF"))
+    target_compile_options(dsp56kEmu PRIVATE $<$<CONFIG:Release>:/GL>)
+    set_property(TARGET dsp56kEmu APPEND PROPERTY STATIC_LIBRARY_OPTIONS $<$<CONFIG:Release>:/LTCG>)
+endif()
+# ms2k_pgo(<target>): the GEN/USE link option for one linked image, its .pgd named after the target
+function(ms2k_pgo tgt)
+    if(NOT MSVC OR MS2K_PGO STREQUAL "OFF")
+        return()
+    endif()
+    file(MAKE_DIRECTORY "${MS2K_PGO_DIR}")
+    if(MS2K_PGO STREQUAL "GEN")
+        target_link_options(${tgt} PRIVATE $<$<CONFIG:Release>:/LTCG /GENPROFILE:PGD=${MS2K_PGO_DIR}/${tgt}.pgd>)
+    elseif(MS2K_PGO STREQUAL "USE")
+        target_link_options(${tgt} PRIVATE $<$<CONFIG:Release>:/LTCG /USEPROFILE:PGD=${MS2K_PGO_DIR}/${tgt}.pgd>)
+    else()
+        message(FATAL_ERROR "MS2K_PGO must be OFF, GEN or USE (is '${MS2K_PGO}')")
+    endif()
+endfunction()
+
 # MS2000 library properties
 set_target_properties(ms2000 PROPERTIES
     CXX_STANDARD 17
@@ -254,6 +283,7 @@ target_link_libraries(ms2000_emulator ms2000)
 if(MSVC)
     target_link_options(ms2000_emulator PRIVATE /OPT:NOREF /MAP)   # PERF-124: map for the sampling profiler
 endif()
+ms2k_pgo(ms2000_emulator)
 
 # MAC-2: --play - CoreAudio output and CoreMIDI in/out (source/audio/host_io_mac.cpp)
 if(APPLE)

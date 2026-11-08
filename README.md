@@ -165,6 +165,17 @@ The finished plugin bundle is `build_vst\VST3_multi\MS2000R.vst3` (the loader mo
 The plugin looks for the folder holding `flash.bin` in `MS2K_HOME`, then `Documents\MS2000R`, then the folders
 above the plugin binary.
 
+Profile-guided build (what the release binaries are): with `build` and `build_vst` configured as above,
+
+```
+powershell -File tools\pgo_build.ps1 -RomDir <the folder with flash.bin and boot-362.bin>
+```
+
+builds both instrumented (`MS2K_PGO=GEN`), trains them on the emulated machine (headless runs and the plugin in
+`MS2000R_HostTest`), and rebuilds them with the profile (`MS2K_PGO=USE`): ~13 % faster standalone, ~9 % less
+plugin CPU, the same audio bit for bit. It needs the firmware for the training and takes ~15 minutes. The profile
+belongs to the exact sources it was trained on - set `-DMS2K_PGO=OFF` again for development builds.
+
 ## Credits
 
 - Written by **Claude** (Anthropic's AI), in a long collaboration with **Tamás Bársony (Tuth)**, who owns the
