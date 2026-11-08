@@ -36,7 +36,7 @@ private:
     void runInput();                        // the panel's input pass (no drawing)
     void showTab(int t);
     juce::Rectangle<float> panelArea() const;
-    void drawLcd(juce::Graphics& g, juce::Rectangle<float> r) const;
+    void drawLcd(juce::Graphics& g, juce::Rectangle<float> r);
     void setupIo();
 
     Ms2kProcessor& m_proc;
@@ -48,6 +48,9 @@ private:
     uint8_t m_cg[256][8] = {}; bool m_cgOk = false;
     juce::Typeface::Ptr m_face;
     juce::Image m_static;                   // the printed panel (VPanel layer false), at the display's pixel scale
+    // LCD-DOTS-1: the dot matrix at its device size, remade only when the dots or the size change
+    juce::Image m_lcdImg;
+    std::vector<uint8_t> m_lcdShown;        // per dot of the 95 x 17 grid: 0 no dot (between cells), 1 unlit, 2 lit
     bool m_dirty = true;
     int m_tab = 0;
     int m_demoPhase = 0; juce::uint32 m_demoT0 = 0;

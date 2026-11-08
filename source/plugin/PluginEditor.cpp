@@ -385,7 +385,11 @@ void Ms2kEditor::timerCallback()
     if (!isShowing() && m_testTick < 0 && m_demoPhase == 0) return;   // DSP-THREAD b: nothing to draw while hidden/minimised
     if (m_testTick >= 0) {
         ++m_testTick;
-        if (m_testTick == 60) setSize(1400, int(std::lround(1400.0f * VPanel::kH / VPanel::kW)) + kTabH);
+        if (m_testTick == 60) {   // LCD-DOTS-1: MS2K_EDITORSHOT_W=<width> takes the shot at another editor width
+            const char* sw = std::getenv("MS2K_EDITORSHOT_W");
+            const int w = juce::jlimit(700, 3840, sw && *sw ? std::atoi(sw) : 1400);
+            setSize(w, int(std::lround(float(w) * VPanel::kH / VPanel::kW)) + kTabH);
+        }
         if (m_testMode == "follow" && m_proc.runner()) {   // the firmware's pot -> value, read back from the edit buffer
             auto cut = [&] { return unsigned(m_proc.runner()->getEmulator().peekExternal(MS2000::kEditBufferAddr + 58)); };
             static unsigned c0 = 0, c1 = 0, c2 = 0;
@@ -451,33 +455,93 @@ void Ms2kEditor::timerCallback()
     if (changed) { m_dirty = false; repaint(); }
 }
 
-// the backlit LCD glass (thin_gui's drawLcdPanel, on juce::Graphics): 16 x 2 cells of 5 x 8 dots fitted into r,
-// every dot on whole pixels; below 3 px a dot keeps no gap
-void Ms2kEditor::drawLcd(juce::Graphics& g, juce::Rectangle<float> r) const
+// LCD-DOTS-1 (the OB-12 plug-in's LCD technique): per device column (or row), which grid cells it overlaps and
+// by how much of a dot. A dot is 0.86 of the pitch, the rest is the gap after it.
+static void dotCover(int pixels, int cells, std::vector<int>& first, std::vector<float>& cover)
 {
-    const juce::Colour glass(186, 220, 64), on(26, 38, 16), off(172, 206, 58);
-    g.setColour(glass); g.fillRoundedRectangle(r, 2.0f);
-    const float dot = juce::jmin(r.getWidth() / 101.0f, r.getHeight() / 23.0f);
-    const float ox = std::floor(r.getCentreX() - 47.5f * dot), oy = std::floor(r.getCentreY() - 8.5f * dot);
-    const float gap = dot >= 3.0f ? juce::jmax(1.0f, std::floor(dot * 0.15f + 0.5f)) : 0.0f;
+    const float pitch = float(pixels) / float(cells), dot = 0.86f;
+    first.assign(size_t(pixels), 0);
+    cover.assign(size_t(pixels) * 3, 0.0f);
+    for (int p = 0; p < pixels; ++p) {
+        const int c0 = juce::jmin(cells - 1, int(float(p) / pitch));
+        first[size_t(p)] = c0;
+        for (int k = 0; k < 3 && c0 + k < cells; ++k) {
+            const float a = float(c0 + k) * pitch, b = a + dot * pitch;
+            const float lo = juce::jmax(a, float(p)), hi = juce::jmin(b, float(p) + 1.0f);
+            cover[size_t(p) * 3 + size_t(k)] = juce::jmax(0.0f, hi - lo);
+        }
+    }
+}
+
+// the backlit LCD glass: 16 x 2 cells of 5 x 8 dots fitted into r. LCD-DOTS-1: the dots are one grid of 95 x 17
+// (a cell is 6 x 9 pitches, the sixth column and the ninth row hold no dot), computed at the exact device size and
+// drawn 1:1 - no column is doubled by scaling, every dot is the same size with a gap at any window size. A device
+// pixel's colour is the area it covers of gap, unlit dot and lit dot. Remade only when the dots or the size change.
+void Ms2kEditor::drawLcd(juce::Graphics& g, juce::Rectangle<float> r)
+{
+    // the unit's yellow-green backlight with dark dots (Tamas' photo of the unit); R G B
+    const float gap[3] = { 186, 220, 64 }, off[3] = { 172, 206, 58 }, on[3] = { 26, 38, 16 };
+    constexpr int kCols = 16 * 6 - 1, kRows = 2 * 9 - 1;
+    g.setColour(juce::Colour(186, 220, 64)); g.fillRoundedRectangle(r, 2.0f);
+    const float ps = juce::jmax(1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const float pitch = juce::jmin(r.getWidth() / 101.0f, r.getHeight() / 23.0f) * ps;   // device pixels
+    const int x0 = juce::roundToInt(r.getCentreX() * ps - 47.5f * pitch), y0 = juce::roundToInt(r.getCentreY() * ps - 8.5f * pitch);
+    const int w = juce::roundToInt(kCols * pitch), h = juce::roundToInt(kRows * pitch);
+    if (w < kCols || h < kRows) return;
+    std::vector<uint8_t> dots(size_t(kCols * kRows), 0);
     for (int ln = 0; ln < 2; ++ln)
         for (int c = 0; c < 16; ++c) {
             const uint8_t ch = uint8_t((ln ? m_lcd.line1 : m_lcd.line0)[c]);
             for (int y = 0; y < 8; ++y) {
                 const uint8_t bits = !m_lcd.displayOn ? 0 : (ch < 16 ? m_lcd.cgram[ch & 7][y] : (m_cgOk ? m_cg[ch][y] : 0));
-                const float y0 = std::floor(oy + (ln * 9 + y) * dot), y1 = std::floor(oy + (ln * 9 + y + 1) * dot) - gap;
-                for (int x = 0; x < 5; ++x) {
-                    const float x0 = std::floor(ox + (c * 6 + x) * dot), x1 = std::floor(ox + (c * 6 + x + 1) * dot) - gap;
-                    g.setColour(((bits >> (4 - x)) & 1) ? on : off);
-                    g.fillRect(x0, y0, x1 - x0, y1 - y0);
-                }
-            }
-            if (!m_cgOk && m_lcd.displayOn && ch >= 0x20 && ch < 0x7F) {
-                g.setColour(on); g.setFont(juce::Font(8.0f * dot, juce::Font::bold));
-                g.drawText(juce::String::charToString(juce::juce_wchar(ch)), juce::Rectangle<float>(ox + c * 6 * dot, oy + ln * 9 * dot, 5 * dot, 8 * dot),
-                           juce::Justification::centred, false);
+                for (int x = 0; x < 5; ++x) dots[size_t((ln * 9 + y) * kCols + c * 6 + x)] = ((bits >> (4 - x)) & 1) ? 2 : 1;
             }
         }
+    if (!m_lcdImg.isValid() || m_lcdImg.getWidth() != w || m_lcdImg.getHeight() != h || dots != m_lcdShown) {
+        if (!m_lcdImg.isValid() || m_lcdImg.getWidth() != w || m_lcdImg.getHeight() != h) m_lcdImg = juce::Image(juce::Image::ARGB, w, h, false);
+        m_lcdShown = dots;
+        std::vector<int> fx, fy; std::vector<float> cx, cy;
+        dotCover(w, kCols, fx, cx);
+        dotCover(h, kRows, fy, cy);
+        juce::Image::BitmapData bd(m_lcdImg, juce::Image::BitmapData::writeOnly);
+        for (int py = 0; py < h; ++py) {
+            uint8_t* line = bd.getLinePointer(py);
+            for (int px = 0; px < w; ++px) {
+                float lit = 0.0f, unlit = 0.0f;
+                for (int j = 0; j < 3; ++j) {
+                    const float wy = cy[size_t(py) * 3 + size_t(j)];
+                    if (wy <= 0.0f) continue;
+                    const int row = fy[size_t(py)] + j;
+                    for (int i = 0; i < 3; ++i) {
+                        const float wx = cx[size_t(px) * 3 + size_t(i)];
+                        if (wx <= 0.0f) continue;
+                        const uint8_t d = dots[size_t(row * kCols + fx[size_t(px)] + i)];
+                        if (d == 2) lit += wx * wy; else if (d == 1) unlit += wx * wy;   // no dot between cells: gap
+                    }
+                }
+                const float rest = juce::jmax(0.0f, 1.0f - lit - unlit);
+                juce::uint8 v[3];
+                for (int k = 0; k < 3; ++k) v[k] = juce::uint8(juce::jmin(255.0f, gap[k] * rest + off[k] * unlit + on[k] * lit + 0.5f));
+                reinterpret_cast<juce::PixelARGB*>(line + px * bd.pixelStride)->setARGB(255, v[0], v[1], v[2]);
+            }
+        }
+    }
+    {
+        juce::Graphics::ScopedSaveState ss(g);
+        g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);   // nearest neighbour; the transform is 1:1 anyway
+        g.drawImageTransformed(m_lcdImg, juce::AffineTransform::translation(float(x0), float(y0)).scaled(1.0f / ps));
+    }
+    if (!m_cgOk && m_lcd.displayOn) {   // no CG ROM: the characters as text over the unlit dots
+        const float dot = pitch / ps, ox = float(x0) / ps, oy = float(y0) / ps;
+        g.setColour(juce::Colour(26, 38, 16)); g.setFont(juce::Font(8.0f * dot, juce::Font::bold));
+        for (int ln = 0; ln < 2; ++ln)
+            for (int c = 0; c < 16; ++c) {
+                const uint8_t ch = uint8_t((ln ? m_lcd.line1 : m_lcd.line0)[c]);
+                if (ch >= 0x20 && ch < 0x7F)
+                    g.drawText(juce::String::charToString(juce::juce_wchar(ch)), juce::Rectangle<float>(ox + c * 6 * dot, oy + ln * 9 * dot, 5 * dot, 8 * dot),
+                               juce::Justification::centred, false);
+            }
+    }
 }
 
 void Ms2kEditor::paint(juce::Graphics& g)
