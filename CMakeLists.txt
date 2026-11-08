@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(KorgMS2000 VERSION 0.9.8 LANGUAGES CXX)
+project(KorgMS2000 VERSION 0.9.9 LANGUAGES CXX)
 
 # MAC-4: a plugin lives in a host that has its own JUCE (or its own anything), and macOS coalesces every exported
 # weak symbol across the loaded images - the host's and the plugin's JUCE then ran each other's inline code (measured:
