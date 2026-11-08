@@ -29,6 +29,7 @@ target_compile_definitions(MS2000R_VST PUBLIC
 target_link_libraries(MS2000R_VST PRIVATE ms2000
     juce::juce_audio_utils juce::juce_audio_processors
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+ms2k_pgo(MS2000R_VST_VST3)   # PGO-1: opt-in (MS2K_PGO=GEN/USE), the linked plugin module
 
 # A console host that loads the built .vst3 like a DAW does and renders a note through processBlock.
 juce_add_console_app(MS2000R_HostTest PRODUCT_NAME "MS2000R_HostTest")
