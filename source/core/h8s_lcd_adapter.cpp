@@ -2,8 +2,9 @@
 #include <iostream>
 #include <tuple>
 
-// Temporarily enable proactive LCD assistance to help unstick firmware
-static constexpr bool MS2K_DISABLE_PROACTIVE_LCD = false;
+// Temporarily disable proactive LCD assistance so the firmware-driven display
+// can be observed without synthetic initialization or diagnostic text.
+static constexpr bool MS2K_DISABLE_PROACTIVE_LCD = true;
 
 namespace MS2000 {
 
@@ -96,15 +97,22 @@ H8SLCDAdapter::H8SLCDAdapter(H8S2350Emulator& h8s, RealLCDDisplay& lcd)
     std::cout << "[H8S-LCD] MP Block interface initialized" << std::endl;
     std::cout << "[H8S-LCD] Communication flow: MCU → AD[0-7] + Sel → MP Block → LCD Pins" << std::endl;
     
-    // Set up initial LCD state
-    m_lcd.exec(false, false, 0x38);  // Function Set: 8-bit, 2-line, 5x8 font
-    m_lcd.exec(false, false, 0x0C);  // Display ON/OFF: Display ON, cursor OFF, blink OFF
-    m_lcd.exec(false, false, 0x06);  // Entry Mode Set: Increment cursor, no display shift
-    m_lcd.exec(false, false, 0x01);  // Clear Display
-    m_lcd.exec(false, false, 0x80);  // Set DDRAM address to 0x00 (first line)
-    
-    // LCD is now ready - NO MOCKUP MESSAGES - let firmware write authentic content
-    std::cout << "[H8S-LCD] LCD hardware ready - waiting for authentic firmware messages" << std::endl;
+    if (!MS2K_DISABLE_PROACTIVE_LCD) {
+        // Set up initial LCD state. This fallback must remain disabled when
+        // validating authentic firmware output.
+        m_lcd.exec(false, false, 0x38);  // Function Set: 8-bit, 2-line, 5x8 font
+        m_lcd.exec(false, false, 0x0C);  // Display ON/OFF: Display ON, cursor OFF, blink OFF
+        m_lcd.exec(false, false, 0x06);  // Entry Mode Set: Increment cursor, no display shift
+        m_lcd.exec(false, false, 0x01);  // Clear Display
+        m_lcd.exec(false, false, 0x80);  // Set DDRAM address to 0x00 (first line)
+        // If enabled, this fallback leaves the LCD initialized without writing
+        // mockup text; normal operation waits for authentic firmware messages.
+
+        std::cout << "[H8S-LCD] LCD hardware ready - waiting for authentic firmware messages" << std::endl;
+    } else {
+        // No synthetic initialization or mockup messages: firmware owns the display.
+        std::cout << "[H8S-LCD] Proactive LCD assistance disabled; firmware must drive the display." << std::endl;
+    }
 }
 
 void H8SLCDAdapter::processLCDCommands()
@@ -532,10 +540,12 @@ void H8SLCDAdapter::processLCDCommands()
     m_lastPort8 = port8;
     m_lastEnable = enable;
     
-    // Proactive port monitoring - if any port shows activity, ensure LCD is ready
-    if (portF != 0 || portG != 0 || portE != 0 || portD != 0) {
+    // Proactive port monitoring - if any port shows activity, ensure LCD is ready.
+    // Disabled: the firmware owns the display state and should not be overridden by
+    // synthetic bootstrap writes.
+    if (!MS2K_DISABLE_PROACTIVE_LCD && (portF != 0 || portG != 0 || portE != 0 || portD != 0)) {
         static bool proactiveInitDone = false;
-        if (!MS2K_DISABLE_PROACTIVE_LCD && !proactiveInitDone) {
+        if (!proactiveInitDone) {
             std::cout << "[H8S-LCD] *** PROACTIVE LCD INITIALIZATION DETECTED ***" << std::endl;
             std::cout << "[H8S-LCD] I/O activity detected - ensuring LCD is ready..." << std::endl;
             
@@ -563,11 +573,15 @@ void H8SLCDAdapter::processLCDCommands()
         m_lastActivityCycle = m_cycleCount;
     }
     
-    // Detect if firmware is stuck in a loop (all ports at 0xFF for too long)
+    // Detect if firmware is stuck in a loop (all candidate ports remain 0xFF).
+    // After more than 10 consecutive checks, the optional recovery below clears
+    // the display, reinitializes the HD44780,
+    // and writes diagnostic messages ("MS2000 Active" / "Firmware Detected").
+    // It is disabled because injected text would hide the actual firmware state.
     static int stuckCounter = 0;
-    if (portF == 0xFF && portG == 0xFF && portE == 0xFF && portD == 0xFF) {
+    if (!MS2K_DISABLE_PROACTIVE_LCD && portF == 0xFF && portG == 0xFF && portE == 0xFF && portD == 0xFF) {
         stuckCounter++;
-        if (!MS2K_DISABLE_PROACTIVE_LCD && stuckCounter > 10) {  // trigger after only 10 cycles
+        if (stuckCounter > 10) {  // Trigger after more than 10 cycles
             static bool stuckHandled = false;
             if (!stuckHandled) {
                 std::cout << "[H8S-LCD] *** FIRMWARE STUCK DETECTED! ***" << std::endl;
@@ -576,12 +590,12 @@ void H8SLCDAdapter::processLCDCommands()
                 
                 // Force some LCD activity to unstick the firmware
                 m_lcd.exec(false, false, 0x01);  // Clear display
-                m_lcd.exec(false, false, 0x38);  // Function set
-                m_lcd.exec(false, false, 0x0C);  // Display on
-                m_lcd.exec(false, false, 0x06);  // Entry mode
-                m_lcd.exec(false, false, 0x80);  // Set DDRAM to first line
+                m_lcd.exec(false, false, 0x38);  // Function Set
+                m_lcd.exec(false, false, 0x0C);  // Display ON
+                m_lcd.exec(false, false, 0x06);  // Entry Mode
+                m_lcd.exec(false, false, 0x80);  // First-line DDRAM address
                 
-                // Write some text
+                // Diagnostic text is only written when proactive recovery is enabled.
                 const char* stuckText = "MS2000 Active";
                 for (int i = 0; stuckText[i] != '\0'; i++) {
                     m_lcd.exec(true, false, stuckText[i]);
@@ -597,17 +611,17 @@ void H8SLCDAdapter::processLCDCommands()
                 stuckHandled = true;
             }
         }
-    } else {
-        stuckCounter = 0;  // Reset counter if any activity detected
+    } else if (!MS2K_DISABLE_PROACTIVE_LCD) {
+        stuckCounter = 0;  // Reset counter if any activity is detected
     }
     
-    // Auto-initialize LCD after 50 cycles if no write activity detected (extremely aggressive)
+    // Optional fallback: after 50 cycles without a write, mark candidate LCD
+    // ports ready, issue the standard HD44780 initialization sequence, and write
+    // test text on both lines. Disabled while the firmware-driven path is tested.
     static bool autoInitTriggered = false;
-    if (m_cycleCount > 50 && !autoInitTriggered) {
-        if (!MS2K_DISABLE_PROACTIVE_LCD) {
-            std::cout << "[H8S-LCD] *** AUTO-INITIALIZING LCD AFTER 50 CYCLES ***" << std::endl;
-            std::cout << "[H8S-LCD] Firmware seems stuck - triggering LCD initialization..." << std::endl;
-        }
+    if (!MS2K_DISABLE_PROACTIVE_LCD && m_cycleCount > 50 && !autoInitTriggered) {
+        std::cout << "[H8S-LCD] *** AUTO-INITIALIZING LCD AFTER 50 CYCLES ***" << std::endl;
+        std::cout << "[H8S-LCD] Firmware seems stuck - triggering LCD initialization..." << std::endl;
         
         // Simulate LCD ready state by writing to all possible LCD ports
         uint32_t lcdPorts[] = {
@@ -618,27 +632,24 @@ void H8SLCDAdapter::processLCDCommands()
         };
         
         for (uint32_t port : lcdPorts) {
-            m_h8s.writeIORegister(port, 0x00);     // Busy flag = 0 (ready)
-            m_h8s.writeIORegister(port - 0x10, 0x00); // Read register
+            m_h8s.writeIORegister(port, 0x00);         // Busy flag = 0 (ready)
+            m_h8s.writeIORegister(port - 0x10, 0x00);  // Read register
         }
         
         std::cout << "[H8S-LCD] LCD auto-initialized on all possible ports" << std::endl;
         autoInitTriggered = true;
         
         // Simulate LCD initialization sequence
-        if (!MS2K_DISABLE_PROACTIVE_LCD) {
-            std::cout << "[H8S-LCD] *** SIMULATING LCD INITIALIZATION SEQUENCE ***" << std::endl;
-        }
+        std::cout << "[H8S-LCD] *** SIMULATING LCD INITIALIZATION SEQUENCE ***" << std::endl;
         
         // Standard HD44780 LCD initialization sequence
         uint8_t initCommands[] = {
             0x38,  // Function Set: 8-bit, 2-line, 5x8 font
             0x0C,  // Display ON/OFF: Display ON, cursor OFF, blink OFF
             0x06,  // Entry Mode Set: Increment cursor, no display shift
-            0x01,  // Clear Display
+            0x01,  // Clear display
             0x80   // Set DDRAM address to 0x00 (first line)
         };
-        
         for (uint8_t cmd : initCommands) {
             std::cout << "[H8S-LCD] Simulating LCD command: 0x" << std::hex << (int)cmd << std::dec;
             switch (cmd) {
@@ -674,8 +685,10 @@ void H8SLCDAdapter::processLCDCommands()
         std::cout << "[H8S-LCD] LCD initialization sequence completed!" << std::endl;
     }
     
-    // Check for timeout (firmware might be stuck waiting)
-    if (m_cycleCount - m_lastActivityCycle > TIMEOUT_CYCLES && m_lastActivityCycle > 0) {
+    // Check for a firmware timeout while waiting for the LCD. The optional
+    // recovery writes "ready" values to the selected data/control registers;
+    // it does not send display text. Disabled so firmware timing remains visible.
+    if (!MS2K_DISABLE_PROACTIVE_LCD && m_cycleCount - m_lastActivityCycle > TIMEOUT_CYCLES && m_lastActivityCycle > 0) {
         std::cout << "[H8S-LCD] *** TIMEOUT DETECTED! ***" << std::endl;
         std::cout << "[H8S-LCD] No LCD activity for " << TIMEOUT_CYCLES << " cycles" << std::endl;
         std::cout << "[H8S-LCD] Firmware might be waiting for LCD response..." << std::endl;
@@ -683,19 +696,16 @@ void H8SLCDAdapter::processLCDCommands()
         // Auto-initialize LCD to help firmware proceed
         static bool autoInitDone = false;
         if (!autoInitDone) {
-            if (!MS2K_DISABLE_PROACTIVE_LCD) {
-                std::cout << "[H8S-LCD] *** AUTO-INITIALIZING LCD ***" << std::endl;
-            }
-            
+            std::cout << "[H8S-LCD] *** AUTO-INITIALIZING LCD ***" << std::endl;
+
             // Simulate LCD ready by writing to data registers
             uint32_t dataDr = selectedDataAddr;
             uint32_t dataR = dataDr - 0x10;
             m_h8s.writeIORegister(dataDr, 0x00);  // Busy flag = 0 (ready)
-            m_h8s.writeIORegister(dataR, 0x00);
-            
-            // Also ensure control registers are in a known state
+            m_h8s.writeIORegister(dataR, 0x00);   // Read register
             uint32_t controlDr = selectedControlAddr;
             uint32_t controlR = controlDr - 0x10;
+            // Also put the control registers in a known state.
             m_h8s.writeIORegister(controlDr, 0x00);
             m_h8s.writeIORegister(controlR, 0x00);
             

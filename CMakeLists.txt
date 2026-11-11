@@ -64,6 +64,13 @@ if(NOT WIN32)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 endif()
 if(NOT MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wno-unused;-Wno-unused-parameter>")
+endif()
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    # The H8S logging macros use GNU comma elision for optional variadic arguments in C++17.
+    add_compile_options(-Wno-gnu-zero-variadic-macro-arguments)
+endif()
+if(NOT MSVC)
     # C++ only (MAC-3: GLFW is C)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/source/core/platform_compat.h>")
     # The sources use 256-bit AVX/AVX2 intrinsics (h8s2350_emulator.h, h8s2350_simd_optimizations).
@@ -84,6 +91,8 @@ endif()
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/source
+)
+include_directories(SYSTEM
     ${CMAKE_CURRENT_SOURCE_DIR}/external/dsp56300/source
     ${CMAKE_CURRENT_SOURCE_DIR}/external/dsp56300/source/dsp56kEmu
     ${CMAKE_CURRENT_SOURCE_DIR}/external/dsp56300/source/dsp56kEmu/include
@@ -328,6 +337,16 @@ elseif(APPLE)
         set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
         set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(glfw imgui)   # imgui has no CMakeLists: this only fetches it
+        set(_imgui_metal_backend "${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm")
+        file(READ "${_imgui_metal_backend}" _imgui_metal_source)
+        # Managed storage is deprecated in current macOS SDKs and has no benefit on Apple Silicon.
+        if(_imgui_metal_source MATCHES "textureDescriptor\\.storageMode = MTLStorageModeManaged;")
+            string(REPLACE
+                "textureDescriptor.storageMode = MTLStorageModeManaged;"
+                "textureDescriptor.storageMode = MTLStorageModeShared;"
+                _imgui_metal_source "${_imgui_metal_source}")
+            file(WRITE "${_imgui_metal_backend}" "${_imgui_metal_source}")
+        endif()
         add_library(ms2k_imgui STATIC
             ${imgui_SOURCE_DIR}/imgui.cpp
             ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -351,14 +370,33 @@ elseif(APPLE)
 
         # MS2000R.app: the same executable in a bundle (started from Finder it opens the GUI). Ad-hoc signed.
         set(MS2K_APP "${CMAKE_BINARY_DIR}/MS2000R.app")
+        set(MS2K_ICONSET "${CMAKE_BINARY_DIR}/KorgMS2000_Icon.iconset")
+        set(MS2K_ICNS "${CMAKE_BINARY_DIR}/KorgMS2000_Icon.icns")
+        add_custom_command(OUTPUT "${MS2K_ICNS}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MS2K_ICONSET}"
+            COMMAND sips -z 16 16 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_16x16.png"
+            COMMAND sips -z 32 32 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_16x16@2x.png"
+            COMMAND sips -z 32 32 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_32x32.png"
+            COMMAND sips -z 64 64 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_32x32@2x.png"
+            COMMAND sips -z 128 128 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_128x128.png"
+            COMMAND sips -z 256 256 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_128x128@2x.png"
+            COMMAND sips -z 256 256 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_256x256.png"
+            COMMAND sips -z 512 512 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_256x256@2x.png"
+            COMMAND sips -z 512 512 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_512x512.png"
+            COMMAND sips -z 1024 1024 "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png" --out "${MS2K_ICONSET}/icon_512x512@2x.png"
+            COMMAND iconutil -c icns "${MS2K_ICONSET}" -o "${MS2K_ICNS}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icon/KorgMS2000_Icon.png"
+            VERBATIM)
         configure_file(cmake/macos/Info.plist.in "${CMAKE_BINARY_DIR}/Info.plist" @ONLY)
         add_custom_target(MS2000R_app
             COMMAND ${CMAKE_COMMAND} -E make_directory "${MS2K_APP}/Contents/MacOS"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MS2K_APP}/Contents/Resources"
             COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ms2000_emulator>" "${MS2K_APP}/Contents/MacOS/ms2000_emulator"
             COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/Info.plist" "${MS2K_APP}/Contents/Info.plist"
+            COMMAND ${CMAKE_COMMAND} -E copy "${MS2K_ICNS}" "${MS2K_APP}/Contents/Resources/KorgMS2000_Icon.icns"
             COMMAND xattr -cr "${MS2K_APP}"   # codesign refuses extended attributes ("detritus")
             COMMAND codesign --force --sign - "${MS2K_APP}"
-            DEPENDS ms2000_emulator
+            DEPENDS ms2000_emulator "${MS2K_ICNS}"
             COMMENT "Assembling MS2000R.app")
     else()
         target_compile_definitions(ms2000_emulator PRIVATE GUI_DISABLED)

@@ -175,18 +175,18 @@ namespace H8S { namespace ExtBr {
     // Real 16-bit Bcc = 0x58 [cc]0 disp16 (decoded separately in instructions.cpp)
     
     // Condition functions (signed compare, CCR: Z,N,V,C) - forceinline for Release stability
-    [[msvc::forceinline]] constexpr inline bool cond_bra(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return true; }
-    [[msvc::forceinline]] constexpr inline bool cond_brn(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return false; }
-    [[msvc::forceinline]] constexpr inline bool cond_bhi(bool Z, bool N, bool V, bool C) { (void)N; (void)V; return !C && !Z; }
-    [[msvc::forceinline]] constexpr inline bool cond_bls(bool Z, bool N, bool V, bool C) { (void)N; (void)V; return C || Z; }
-    [[msvc::forceinline]] constexpr inline bool cond_bcc(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return !C; }
-    [[msvc::forceinline]] constexpr inline bool cond_bcs(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return C; }
-    [[msvc::forceinline]] constexpr inline bool cond_bne(bool Z, bool N, bool V, bool C) { (void)N; (void)V; (void)C; return !Z; }
-    [[msvc::forceinline]] constexpr inline bool cond_beq(bool Z, bool N, bool V, bool C) { (void)N; (void)V; (void)C; return Z; }
-    [[msvc::forceinline]] constexpr inline bool cond_bvc(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return !V; }
-    [[msvc::forceinline]] constexpr inline bool cond_bvs(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return V; }
-    [[msvc::forceinline]] constexpr inline bool cond_bpl(bool Z, bool N, bool V, bool C) { (void)Z; (void)V; (void)C; return !N; }
-    [[msvc::forceinline]] constexpr inline bool cond_bmi(bool Z, bool N, bool V, bool C) { (void)Z; (void)V; (void)C; return N; }
+    __forceinline constexpr bool cond_bra(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return true; }
+    __forceinline constexpr bool cond_brn(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return false; }
+    __forceinline constexpr bool cond_bhi(bool Z, bool N, bool V, bool C) { (void)N; (void)V; return !C && !Z; }
+    __forceinline constexpr bool cond_bls(bool Z, bool N, bool V, bool C) { (void)N; (void)V; return C || Z; }
+    __forceinline constexpr bool cond_bcc(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return !C; }
+    __forceinline constexpr bool cond_bcs(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return C; }
+    __forceinline constexpr bool cond_bne(bool Z, bool N, bool V, bool C) { (void)N; (void)V; (void)C; return !Z; }
+    __forceinline constexpr bool cond_beq(bool Z, bool N, bool V, bool C) { (void)N; (void)V; (void)C; return Z; }
+    __forceinline constexpr bool cond_bvc(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return !V; }
+    __forceinline constexpr bool cond_bvs(bool Z, bool N, bool V, bool C) { (void)Z; (void)N; (void)V; (void)C; return V; }
+    __forceinline constexpr bool cond_bpl(bool Z, bool N, bool V, bool C) { (void)Z; (void)V; (void)C; return !N; }
+    __forceinline constexpr bool cond_bmi(bool Z, bool N, bool V, bool C) { (void)Z; (void)V; (void)C; return N; }
     
     // DELETED: cond_bge, cond_blt, cond_bgt, cond_ble - these opcodes (0x7C-0x7F) are bit-manipulation in H8S, not extended branches
     
@@ -282,10 +282,10 @@ namespace H8S { namespace SUBX {
     // Opcodes
     constexpr uint8_t RR_PRIMARY = 0x1E;  // SUBX.B Rr,Rd
     constexpr uint8_t IMM_BASE   = 0xB0;  // SUBX.B #imm8,Rd (B0..B7)
-    [[msvc::forceinline]] constexpr inline uint8_t IMM_LAST() { return (uint8_t)(IMM_BASE + 7); }
+    __forceinline constexpr uint8_t IMM_LAST() { return (uint8_t)(IMM_BASE + 7); }
 
     // Z flag retention helper: if res!=0 -> Z=0, else keep previous Z
-    [[msvc::forceinline]] constexpr inline bool z_after(bool prevZ, uint8_t res) {
+    __forceinline constexpr bool z_after(bool prevZ, uint8_t res) {
         return (res != 0) ? false : prevZ;
     }
 }}
@@ -623,4 +623,3 @@ static inline void be24_unpack(uint32_t v, uint8_t& b2, uint8_t& b1, uint8_t& b0
 #else
   #define H8S_DEV_ASSERT(cond, fmt, ...) do {} while(0)
 #endif
-

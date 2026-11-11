@@ -27,7 +27,7 @@ public:
       line_[0].fill(' '); line_[1].fill(' '); ddram_=0;
     } else if (c == 0x02) { // Home
       ddram_ = 0;
-    } else if ((c & 0xF8) == 0x04) { // fw26.txt: Entry Mode Set 0b000001IS
+    } else if ((c & 0xFC) == 0x04) { // fw26.txt: Entry Mode Set 0b000001IS
       increment_ = (c & 0x02) != 0;
       shiftOnWrite_ = (c & 0x01) != 0;
     } else if (c & 0x80) { // Set DDRAM

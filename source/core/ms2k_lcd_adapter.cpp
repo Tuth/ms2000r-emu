@@ -33,7 +33,7 @@ void Ms2kLcdAdapter::writePort(uint8_t port, uint8_t value) {
     }
 
     if (log) { 
-        char b[64]; 
+        char b[64];
         snprintf(b,sizeof(b),"[GPIO-MONITOR] WRITE port=0x%02X value=0x%02X\n", port, value); 
         log(b); 
     }
@@ -42,7 +42,7 @@ void Ms2kLcdAdapter::writePort(uint8_t port, uint8_t value) {
     if (port == 4) {  // Port 4: RS, RW, E, DB4
         updateLatchFromPort4(value);
         if (log) { 
-            char b[128]; 
+            char b[128];
             snprintf(b,sizeof(b),"[LCD-ADAPTER] CTRL WRITE Port 4: value=0x%02X RS=%d RW=%d E=%d DB4=%d\n", 
                      value, (value>>4)&1, (value>>5)&1, (value>>6)&1, (value>>7)&1); 
             log(b); 
@@ -50,7 +50,7 @@ void Ms2kLcdAdapter::writePort(uint8_t port, uint8_t value) {
     } else if (port == 5) {  // Port 5: DB5, DB6, DB7
         updateLatchFromPort5(value);
         if (log) { 
-            char b[128]; 
+            char b[128];
             snprintf(b,sizeof(b),"[LCD-ADAPTER] DATA WRITE Port 5: value=0x%02X DB5=%d DB6=%d DB7=%d\n", 
                      value, (value>>0)&1, (value>>1)&1, (value>>2)&1); 
             log(b); 
@@ -76,7 +76,7 @@ uint8_t Ms2kLcdAdapter::readPort(uint8_t port) {
 
     // fw3.txt monitoring: Log ALL port reads to find firmware LCD ports
     if (log) { 
-        char b[64]; 
+        char b[64];
         snprintf(b,sizeof(b),"[GPIO-MONITOR] READ port=0x%02X RW=%d E=%d RS=%d\n", 
                  port, (int)RW_is_asserted(), (int)E_is_asserted(), (int)RS()); 
         log(b); 
@@ -89,8 +89,8 @@ uint8_t Ms2kLcdAdapter::readPort(uint8_t port) {
 
     if (bootstrap) {
         if (log) { 
-            char b[64]; 
-            snprintf(b,sizeof(b),"[LCD-ADAPTER] FW4 BOOTSTRAP: ANY read port=0x%02X -> BF=0 (extended power-up)\n", port); 
+            char b[128];
+            snprintf(b,sizeof(b),"[LCD-ADAPTER] FW4 BOOTSTRAP: ANY read port=0x%02X -> BF=0 (extended power-up)\n", port);
             log(b); 
         }
         return 0x00; // DB7=0 (busy flag clear) - break ANY busy state
@@ -107,7 +107,7 @@ uint8_t Ms2kLcdAdapter::readPort(uint8_t port) {
             bf_read_count++;
             uint8_t status = 0x00;  // BF=0 (not busy), AC=0x00
             if (log) { 
-                char b[64]; 
+                char b[128];
                 snprintf(b,sizeof(b),"[LCD-ADAPTER] BF read on Port 4: status=0x%02X (BF=0)\n", status); 
                 log(b); 
             }
@@ -176,7 +176,7 @@ void Ms2kLcdAdapter::writeAddress(uint32_t address, uint8_t value)
         bool e  = E_is_asserted();
 
         if (log) { 
-            char b[128]; 
+            char b[128];
             snprintf(b,sizeof(b),"[LCD-ADAPTER-NEW] CTRL WRITE Port 4: value=0x%02X RS=%d RW=%d E=%d DB4=%d\n", 
                      value, rs, rw, e, (value>>7)&1); 
             log(b); 
@@ -374,7 +374,7 @@ void Ms2kLcdAdapter::commit(bool rs, bool rw)
         m_latchedHighNibble = highNibble;
         m_latch4bitState = true;
         if (log) { 
-            char b[64]; 
+            char b[128];
             snprintf(b,sizeof(b),"[LCD-ADAPTER] 4-bit: Got HIGH nibble 0x%01X, waiting for LOW nibble\n", highNibble); 
             log(b); 
         }
@@ -395,7 +395,7 @@ void Ms2kLcdAdapter::commit(bool rs, bool rw)
     m_latchValid = false;
     
     if (log) { 
-        char b[64]; 
+        char b[128];
         snprintf(b,sizeof(b),"[LCD-ADAPTER] 4-bit: Combined byte 0x%02X (hi=0x%01X lo=0x%01X) RS=%d RW=%d\n", 
                  fullByte, (m_latchedHighNibble >> 4) & 0x0F, lowNibble & 0x0F, RS(), RW());
         log(b); 

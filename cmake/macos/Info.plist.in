@@ -7,6 +7,7 @@
     <key>CFBundleIdentifier</key>           <string>io.github.ms2000r-emu.standalone</string>
     <key>CFBundleExecutable</key>           <string>ms2000_emulator</string>
     <key>CFBundlePackageType</key>          <string>APPL</string>
+    <key>CFBundleIconFile</key>             <string>KorgMS2000_Icon.icns</string>
     <key>CFBundleShortVersionString</key>   <string>@PROJECT_VERSION@</string>
     <key>CFBundleVersion</key>              <string>@PROJECT_VERSION@</string>
     <key>LSMinimumSystemVersion</key>       <string>11.0</string>

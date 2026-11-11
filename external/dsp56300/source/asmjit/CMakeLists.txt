@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 
 cmake_policy(PUSH)
 
@@ -217,9 +217,11 @@ if (NOT ASMJIT_NO_CUSTOM_FLAGS)
     list(APPEND ASMJIT_PRIVATE_CFLAGS -fno-math-errno)
     list(APPEND ASMJIT_PRIVATE_CFLAGS_REL -O2)
 
-    asmjit_detect_cflags(ASMJIT_PRIVATE_CFLAGS
-      -fno-threadsafe-statics
-      -fno-semantic-interposition)
+    asmjit_detect_cflags(ASMJIT_PRIVATE_CFLAGS -fno-threadsafe-statics)
+
+    if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+      asmjit_detect_cflags(ASMJIT_PRIVATE_CFLAGS -fno-semantic-interposition)
+    endif()
 
     # The following flags can save few bytes in the resulting binary.
     asmjit_detect_cflags(ASMJIT_PRIVATE_CFLAGS_REL
@@ -498,8 +500,12 @@ if (NOT ASMJIT_EMBED)
                     CFLAGS_DBG ${ASMJIT_PRIVATE_CFLAGS_DBG}
                     CFLAGS_REL ${ASMJIT_PRIVATE_CFLAGS_REL})
 
+  if (APPLE AND "${CMAKE_CXX_COMPILER_ID}" STREQUAL "AppleClang")
+    target_compile_options(asmjit PUBLIC -Wno-gnu-anonymous-struct -Wno-nested-anon-types)
+  endif()
+
   target_compile_options(asmjit INTERFACE ${ASMJIT_CFLAGS})
-  target_include_directories(asmjit BEFORE INTERFACE
+  target_include_directories(asmjit SYSTEM BEFORE INTERFACE
                              $<BUILD_INTERFACE:${ASMJIT_INCLUDE_DIRS}>
                              $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 

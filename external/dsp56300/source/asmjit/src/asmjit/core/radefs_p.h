@@ -396,7 +396,7 @@ struct RALiveInterval {
 
   inline RALiveInterval() noexcept : a(0), b(0) {}
   inline RALiveInterval(uint32_t a, uint32_t b) noexcept : a(a), b(b) {}
-  inline RALiveInterval(const RALiveInterval& other) noexcept : a(other.a), b(other.b) {}
+  inline RALiveInterval(const RALiveInterval& other) noexcept = default;
 
   inline void init(uint32_t aVal, uint32_t bVal) noexcept {
     a = aVal;
@@ -438,7 +438,7 @@ public:
   //! \{
 
   inline RALiveSpan() noexcept : RALiveInterval(), T() {}
-  inline RALiveSpan(const RALiveSpan<T>& other) noexcept : RALiveInterval(other), T() {}
+  inline RALiveSpan(const RALiveSpan<T>& other) noexcept = default;
   inline RALiveSpan(const RALiveInterval& interval, const T& data) noexcept : RALiveInterval(interval), T(data) {}
   inline RALiveSpan(uint32_t a, uint32_t b) noexcept : RALiveInterval(a, b), T() {}
   inline RALiveSpan(uint32_t a, uint32_t b, const T& data) noexcept : RALiveInterval(a, b), T(data) {}
@@ -463,10 +463,7 @@ public:
   //! \name Overloaded Operators
   //! \{
 
-  inline RALiveSpan& operator=(const RALiveSpan& other) {
-    init(other);
-    return *this;
-  }
+  inline RALiveSpan& operator=(const RALiveSpan& other) = default;
 
   //! \}
 };
@@ -667,6 +664,7 @@ struct LiveRegData {
 
   inline explicit LiveRegData(uint32_t id = BaseReg::kIdBad) noexcept : id(id) {}
   inline LiveRegData(const LiveRegData& other) noexcept = default;
+  inline LiveRegData& operator=(const LiveRegData& other) noexcept = default;
 
   inline void init(const LiveRegData& other) noexcept { id = other.id; }
 

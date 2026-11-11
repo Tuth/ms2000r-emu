@@ -39,11 +39,11 @@ int64_t nowNs() { return int64_t(std::chrono::duration_cast<std::chrono::nanosec
 // HD44780 A00 character generator, if the local dump is present (16 bytes a character, rows
 // 0-7 used, 5 low bits). Without it the LCD is drawn as text.
 struct CgRom { bool ok = false; uint8_t d[256][8]{}; };
-CgRom loadCgRom()
+CgRom loadCgRom(const std::filesystem::path& romDirectory)
 {
     CgRom r;
     for (const char* p : { "hd44780_a00.bin", "full FW/hd44780_a00.bin", "Full FW/hd44780_a00.bin", "../hd44780_a00.bin", "../../hd44780_a00.bin" }) {   // ROM-PATHS-1
-        std::ifstream f(p, std::ios::binary);
+        std::ifstream f(romDirectory / p, std::ios::binary);
         if (!f) continue;
         std::vector<char> b((std::istreambuf_iterator<char>(f)), {});
         if (b.size() < 4096) continue;
@@ -169,6 +169,7 @@ int run_thin_gui(MS2000::Ms2kRunner& runner, std::function<std::unique_ptr<MS200
     // R = the running machine, nullptr while switched off.
     MS2000::Ms2kRunner* R = &runner;
     std::unique_ptr<MS2000::Ms2kRunner> owned;
+    const CgRom rom = loadCgRom(std::filesystem::current_path());
     bool off = false;
     static VPanel::IO vio;                                // the vector panel's state (held keys survive a power cycle)
     static bool swHeld[7][8] = {};                        // the test panel's held keys
@@ -190,7 +191,6 @@ int run_thin_gui(MS2000::Ms2kRunner& runner, std::function<std::unique_ptr<MS200
     }
     GuiPlatform::initBackends();
 
-    const CgRom rom = loadCgRom();
     Settings st = loadSettings();
 
     DSP56362Emulator* dsp = R->getEmulator().dsp();

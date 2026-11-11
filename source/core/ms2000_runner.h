@@ -337,7 +337,7 @@ public:
     // GUI state tracking  
     uint16_t m_knobValues[32]; // 32 potentiometers as per hardware spec
     bool m_buttonStates[64] = {false}; // Support up to 64 buttons
-    bool m_ledStates[128][3] = {false}; // Support up to 128 LEDs, 3 colors each
+    bool m_ledStates[128][3] = {{false}}; // Support up to 128 LEDs, 3 colors each
     
     // fw15.txt: Deterministic state and recording
     DeterministicState m_deterministicState;

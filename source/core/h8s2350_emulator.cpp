@@ -136,12 +136,23 @@ static inline void setVectorBE32(H8S2350Emulator* cpu, uint32_t vbr, uint8_t vec
 // ==== Constructor and Destructor ====
 
 H8S2350Emulator::H8S2350Emulator()
-    : m_registers{}
+    : m_trace(false)  // Quiet by default; use --trace-cpu=always to enable
+    , m_registers{}
     , m_flags{}
     , m_mode(H8S2350Mode::MODE_4)
     , m_syscr(0x01)  // Initialize SYSCR like MAME H8S/2357
     , m_debug_mode(false)
+    , m_trace_cpu_always(false)  // Will be set by --trace-cpu=always flag
+    , m_quietBoot(false)  // FIX21: Suppress per-instruction verbose trace for fast boot
     , m_cycles_executed(0)
+    , m_lcd_display(nullptr)
+    , m_lcd_cursor_position(0)
+    , m_panel_interface(nullptr)
+    , m_mp_stub(std::make_unique<MS2000MPStub>())
+    , m_panel_adc(std::make_unique<MS2000PanelADC>())
+    , m_switch_matrix(std::make_unique<MS2000SwitchMatrix>())
+    , m_led_matrix(std::make_unique<MS2000LEDMatrix>())
+    , m_midi_interface(std::make_unique<MS2000MIDIInterfaceSimple>())
     // BUG50, 2026-09-13 - the clock is 10 MHz, and the constant is DECORATIVE.
     //
     // KOD-A30411: X1 is a CSTCC10.0MG, 10 MHz, on XTAL/EXTAL. The firmware agrees:
@@ -167,19 +178,8 @@ H8S2350Emulator::H8S2350Emulator()
     , m_dev_illegal_guard_enabled(true)  // k5.txt: Enable by default
     , m_illegal_skip_count(0)
     , m_vecpage_candidate(0)  // k8.txt: No candidate initially
-    , m_lcd_display(nullptr)
-    , m_lcd_cursor_position(0)
-    , m_panel_interface(nullptr)
-    , m_mp_stub(std::make_unique<MS2000MPStub>())
-    , m_panel_adc(std::make_unique<MS2000PanelADC>())
-    , m_switch_matrix(std::make_unique<MS2000SwitchMatrix>())
-    , m_led_matrix(std::make_unique<MS2000LEDMatrix>())
-    , m_midi_interface(std::make_unique<MS2000MIDIInterfaceSimple>())
     , m_stack_alignment_errors(0)      // v2.txt improvement #2: Stack alignment statistics
     , m_stack_alignment_corrections(0) // v2.txt improvement #2: Stack alignment statistics
-    , m_trace(false)  // Quiet by default; use --trace-cpu=always to enable
-    , m_trace_cpu_always(false)  // Will be set by --trace-cpu=always flag
-    , m_quietBoot(false)  // FIX21: Suppress per-instruction verbose trace for fast boot
 {
     printf("[DEBUG] 🚀 H8S2350Emulator constructor called\n");
     // Initialize memory arrays to zero (updated based on MS2000 schematic page 14)
@@ -13235,7 +13235,7 @@ void H8S2350Emulator::processLCDData(uint8_t data)
         // Write character to LCD display at current cursor position
         if (m_lcd_display) {
             int line = m_lcd_cursor_position / 40;  // 40 characters per line
-            int pos = m_lcd_cursor_position % 40;   // Position within line
+            const std::size_t pos = m_lcd_cursor_position % 40;   // Position within line
             
             if (line < 2 && pos < 20) {  // 2 lines, 20 characters each
                 std::string current_text = m_lcd_display->getText(line);

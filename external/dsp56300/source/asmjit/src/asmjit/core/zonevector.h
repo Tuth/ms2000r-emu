@@ -210,7 +210,7 @@ public:
 
     T* dst = static_cast<T*>(_data) + index;
     ::memmove(dst + 1, dst, size_t(_size - index) * sizeof(T));
-    memcpy(dst, &item, sizeof(T));
+    memcpy(static_cast<void*>(dst), &item, sizeof(T));
     _size++;
 
     return kErrorOk;
@@ -274,7 +274,7 @@ public:
 
     T* dst = static_cast<T*>(_data) + index;
     ::memmove(dst + 1, dst, size_t(_size - index) * sizeof(T));
-    memcpy(dst, &item, sizeof(T));
+    memcpy(static_cast<void*>(dst), &item, sizeof(T));
     _size++;
   }
   //! Concatenates all items of `other` at the end of the vector.

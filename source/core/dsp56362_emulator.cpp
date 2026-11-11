@@ -796,12 +796,12 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
             if (pcwatch >= 0 && pcBefore == TWord(pcwatch) && double(m_mcuCyclesRun) / double(mcuHz) >= pcwT) {
                 static unsigned pw = 0;
                 if (pw < pcwN) { ++pw;
-                    printf("[DSP-PCWATCH] t=%.6f P:%06lX r:", double(m_mcuCyclesRun) / double(mcuHz), pcwatch);
+                    printf("[DSP-PCWATCH] t=%.6f P:%06lX r:", double(m_mcuCyclesRun) / double(mcuHz), static_cast<unsigned long>(pcwatch));
                     for (int k = 0; k < 8; ++k) printf(" %06X", m_dsp->regs().r[k].toWord());
                     const TWord r7 = m_dsp->regs().r[7].toWord();
                     printf("  x:(r7..r7+5):");
                     for (TWord k = 0; k < 6; ++k) printf(" %06X", m_mem->get(MemArea_X, (r7 + k) & 0xFFFFFF));
-                    printf("  x0=%06X b0=%06X  y:(r7..r7+15):", m_dsp->regs().x.var & 0xFFFFFF, TWord(m_dsp->regs().b.var & 0xFFFFFF));
+                    printf("  x0=%06X b0=%06X  y:(r7..r7+15):", TWord(m_dsp->regs().x.var & 0xFFFFFF), TWord(m_dsp->regs().b.var & 0xFFFFFF));
                     for (TWord k = 0; k < 16; ++k) printf(" %06X", m_mem->get(MemArea_Y, (r7 + k) & 0xFFFFFF));
                     printf("  y:$91=%06X\n", m_mem->get(MemArea_Y, 0x91));
                 }
@@ -811,8 +811,8 @@ void DSP56362Emulator::runForMcuCycles(uint32_t mcuCycles, uint32_t mcuHz)
             // MS2K_DSPYWATCH_T=<MCU s>: report only from that time on (measurement only).
             static const double ywT = [] { const char* e = std::getenv("MS2K_DSPYWATCH_T"); return e ? std::atof(e) : 0.0; }();
             if (now != last && told < 40 && double(m_mcuCyclesRun) / double(mcuHz) >= ywT) { ++told;
-                printf("[DSP-YWATCH] %c:%06lX %06X -> %06X at MCU t=%.6f, exec from PC=%06X now PC=%06X, "
-                       "SHI words in=%llu\n", watchX ? 'X' : 'Y', ywatch, last, now, double(m_mcuCyclesRun) / double(mcuHz),
+                printf("[DSP-YWATCH] %c:%06llX %06X -> %06X at MCU t=%.6f, exec from PC=%06X now PC=%06X, "
+                       "SHI words in=%llu\n", watchX ? 'X' : 'Y', static_cast<unsigned long long>(ywatch), last, now, double(m_mcuCyclesRun) / double(mcuHz),
                        pcBefore, m_dsp->getPC().toWord(), (unsigned long long)m_wordsIn);
                 printf("[DSP-YWATCH] last exec() starts:");
                 for (unsigned k = 0; k < RN; ++k) printf(" %X", ring[(ri + k) % RN]);

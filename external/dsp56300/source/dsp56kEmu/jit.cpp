@@ -1,6 +1,8 @@
 #include "jit.h"
 
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 #include <thread>
 #include <functional>
 
@@ -438,10 +440,7 @@ namespace dsp56k
 
 	Jit* Jit::toJitPtr(DspRegs* _regs)
 	{
-		const auto offsetRegs = offsetof(DSP, reg);
-		const auto offsetJit = offsetof(DSP, m_jit);
-
-		return reinterpret_cast<Jit*>(reinterpret_cast<uint8_t*>(_regs) + offsetJit - offsetRegs);
+		return _regs->jit;
 	}
 
 	void Jit::notifyProgramMemWrite(const TWord _offset)

@@ -48,9 +48,7 @@ struct RAStackGap {
     : offset(offset),
       size(size) {}
 
-  inline RAStackGap(const RAStackGap& other) noexcept
-    : offset(other.offset),
-      size(other.size) {}
+  inline RAStackGap(const RAStackGap& other) noexcept = default;
 
   uint32_t offset;
   uint32_t size;

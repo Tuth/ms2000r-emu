@@ -444,15 +444,16 @@ public:
   //! Creates a new `ZoneAllocator`.
   //!
   //! \note To use it, you must first `init()` it.
-  inline ZoneAllocator() noexcept {
-    memset(this, 0, sizeof(*this));
-  }
+  inline ZoneAllocator() noexcept
+    : _zone(nullptr),
+      _slots{},
+      _dynamicBlocks(nullptr) {}
 
   //! Creates a new `ZoneAllocator` initialized to use `zone`.
-  inline explicit ZoneAllocator(Zone* zone) noexcept {
-    memset(this, 0, sizeof(*this));
-    _zone = zone;
-  }
+  inline explicit ZoneAllocator(Zone* zone) noexcept
+    : _zone(zone),
+      _slots{},
+      _dynamicBlocks(nullptr) {}
 
   //! Destroys the `ZoneAllocator`.
   inline ~ZoneAllocator() noexcept { reset(); }

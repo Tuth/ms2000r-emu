@@ -18,6 +18,10 @@ struct LcdGuiSnapshot {
 
 class LcdGuiBuffer {
 public:
+  LcdGuiBuffer() {
+    clearUnlocked();
+  }
+
   // --- BRIDGE: call these where you used to call hd44780::writeCmd/Data ---
   void onCmd(uint8_t c) {
     std::lock_guard<std::mutex> lk(m_);
@@ -91,7 +95,20 @@ public:
     return s;
   }
 
-  void reset() { std::lock_guard<std::mutex> lk(m_); clearUnlocked(); }
+  void reset() {
+    std::lock_guard<std::mutex> lk(m_);
+    clearUnlocked();
+    inc_ = true;
+    shift_ = false;
+    displayOn_ = false;
+    cursorOn_ = false;
+    blinkOn_ = false;
+    for (auto& character : cgram_) {
+      for (auto& row : character) {
+        row = 0;
+      }
+    }
+  }
 
 private:
   std::mutex m_;

@@ -43,6 +43,8 @@ namespace dsp56k
 				writeMemOrPeriph(area, ea, regMem);
 			}
 			break;
+		case Immediate:
+			break;
 		}
 	}
 	
