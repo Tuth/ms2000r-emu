@@ -5789,10 +5789,15 @@ void H8S2350Emulator::tickPeripherals(uint32_t cycles)
             m_dmac_pace_accum += cycles;
             if (m_dmac_pace_accum >= 64) m_dmac_pace_accum = 0;
         }
+        if (m_adcInline) {     // PERF-ADC-1
+            if (m_adc_busy_cycles > cycles) m_adc_busy_cycles -= cycles;
+            else { adcStep(cycles); if (!adcInlineOk()) m_perBudget = 0; }
+        }
         return;
     }
     peripheralsSync();
     tickPeripheralsNow(cycles);
+    m_adcInline = adcInlineOk();   // PERF-ADC-1: before the budget, which leaves the converter out while this is set
     m_perBudget = peripheralBudget();
     if (g_ms2kOpHist) { unsigned b = 0; for (uint64_t v = m_perBudget; v > 1 && b < 31; v >>= 1) ++b; ++g_ms2kBudgetLog2[b]; ++g_ms2kBudgetWhoN[g_ms2kBudgetWho & 31]; }
     m_perDmacFast = m_io_registers.DMAC_FF00_FF07[7] == 0;
@@ -5804,9 +5809,33 @@ void H8S2350Emulator::peripheralsSync()
         const uint32_t p = m_perPend;
         m_perPend = 0;
         m_dmacPaceDone = m_perDmacFast;   // PERF-136: the pace already moved chunk by chunk
+        m_adcSkipTick = m_adcInline;      // PERF-ADC-1: these cycles reached the converter chunk by chunk
         tickPeripheralsNow(p);
+        m_adcSkipTick = false;
         m_dmacPaceDone = false;
     }
+}
+
+// ===========================================================================
+// PERF-ADC-1 (2026-11-14) - THE A/D CONVERTER'S OWN EVENT DOES NOT TICK THE OTHER PERIPHERALS.
+//
+// MS2K_OPHIST, 19 s render: tickPeripheralsNow() ran 10.1 M times for 39.9 M instructions, and in steady
+// state about half of those runs were ended by nothing but an A/D conversion finishing (134 phi cycles a
+// channel, scan mode AN4-AN7, ADIE = 0 - the firmware's ADCSR = 0x3F). Such an end moves only the
+// converter: ADDRx, the channel, ADF. So while the converter is in scan mode with ADIE = 0 the batching
+// branches count its cycles themselves and finish the conversion at the SAME instruction boundary as
+// before (adcStep() with the chunk that reaches zero - the overshoot is dropped exactly as it was), and
+// peripheralBudget() leaves it out. The other peripherals then see those chunks merged, which is what
+// batching already does between their own events. The pending cycles a sync or an event tick hands to
+// tickPeripheralsNow() are not given to the converter twice (m_adcSkipTick); the event chunk, and every
+// chunk of an instruction that touched an I/O register, still goes through adcStep() there.
+// Single mode, ADIE = 1 and MS2K_ADCTRACE keep the old path. MS2K_ADCINLINE=off: the old path (A/B).
+// ===========================================================================
+static const bool g_ms2kAdcInline = [] { const char* e = std::getenv("MS2K_ADCINLINE"); return !(e && (std::strcmp(e, "off") == 0 || *e == '0')); }();
+bool H8S2350Emulator::adcInlineOk() const
+{
+    return g_ms2kAdcInline && g_ms2kPeriphBatch && !m_peripheral && ms2kAdc() && m_adc_converting
+        && (m_adc_adcsr & 0x10u) && !(m_adc_adcsr & 0x40u) && g_adcTraceLeft <= 0;
 }
 
 bool H8S2350Emulator::peripheralEventNow() const
@@ -5828,7 +5857,7 @@ uint64_t H8S2350Emulator::peripheralBudget() const
     if (m_sci1_tx_active) lower(m_sci1_tx_busy_cycles, 2);
     if (m_sci0_tx_active) lower(m_sci0_tx_busy_cycles, 3);
     else if ((m_sci[0].SCR & 0x20) && !(m_sci[0].SSR & 0x80)) { g_ms2kBudgetWho = 13; return 0; }       // sci0TryLoadTsr() would load
-    if (ms2kAdc() && m_adc_converting) lower(m_adc_busy_cycles, 4);
+    if (ms2kAdc() && m_adc_converting && !m_adcInline) lower(m_adc_busy_cycles, 4);   // PERF-ADC-1: counted inline otherwise
     // dmacStep's pace. With no DTE set a crossing only resets the phase, which the batching path
     // keeps chunk by chunk (PERF-136); with a DTE set the crossing chunk services the DMAC.
     if (m_io_registers.DMAC_FF00_FF07[7] != 0) lower(64u - (m_dmac_pace_accum < 64u ? m_dmac_pace_accum : 64u), 5);
@@ -5950,7 +5979,7 @@ void H8S2350Emulator::tickPeripheralsNow(uint32_t cycles)
     g_ms2kPhase = "sci1rx"; sci1RxStep(cycles);   // BUG108: MIDI IN
     g_ms2kPhase = "sci0tx"; sci0TxStep(cycles);   // BUG77: SCI0 has a transmitter now
     g_ms2kPhase = "dsp";   if (m_dsp) m_dsp->tickMcu(cycles, getClockFrequency());   // BUG105: the DSP56362 runs (PERF-131: lazily)
-    g_ms2kPhase = "adc";   adcStep(cycles);      // BUG78: the A/D converter takes time too
+    g_ms2kPhase = "adc";   if (!m_adcSkipTick) adcStep(cycles);      // BUG78: the A/D converter takes time too (PERF-ADC-1: not twice)
     g_ms2kPhase = "legacy";
 
     // BUG105: this raised RXI0 on EVERY step whenever RIE && RE - "RX is always available
@@ -6493,6 +6522,10 @@ void H8S2350Emulator::executeInstructionFast()
         if (m_perDmacFast) {
             m_dmac_pace_accum += cycles;
             if (m_dmac_pace_accum >= 64) m_dmac_pace_accum = 0;
+        }
+        if (m_adcInline) {     // PERF-ADC-1, as in tickPeripherals()
+            if (m_adc_busy_cycles > cycles) m_adc_busy_cycles -= cycles;
+            else { adcStep(cycles); if (!adcInlineOk()) m_perBudget = 0; }
         }
     } else {
         tickPeripherals(cycles);

@@ -1279,6 +1279,10 @@ private:
     bool     m_inTick    = false;                   // inside tickPeripheralsNow(): no re-entrant sync
     bool     m_perDmacFast  = false;                // PERF-136: no DTE set - the batching path keeps dmacStep's pace
     bool     m_dmacPaceDone = false;                // PERF-136: dmacStep() skips a pending flush it has nothing to do in
+    // PERF-ADC-1: scan-mode A/D with ADIE = 0 is counted by the batching branches themselves (see tickPeripherals()).
+    bool     adcInlineOk() const;
+    bool     m_adcInline   = false;                 // the batching branches give the A/D converter its cycles
+    bool     m_adcSkipTick = false;                 // inside peripheralsSync(): the pending cycles are already counted
     
     // CPU state
     H8S2350Registers m_registers;

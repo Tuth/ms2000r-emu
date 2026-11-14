@@ -1,4 +1,5 @@
 // fw15.txt: Production-ready unified CLI for ms2000_emulator
+#include "../core/io_probe.h"
 #include <memory>
 #include "../core/ms2000_runner.h"
 #include "../core/headless_runner.h"
@@ -1414,6 +1415,7 @@ int main(int argc, char** argv) {
         std::cout << "[RENDER-TEST] silence frames " << runner.renderSilenceFrames() << "\n";
         std::cout << "[RENDER-TEST] " << done << " frames in " << blocks << " blocks, MCU t=" << double(runner.getEmulator().getCycles()) / 10e6
                   << " s, wall " << wall << " s -> " << config.renderTest << "\n";
+        if (std::getenv("MS2K_IOTOP")) IoProbe::dump_top(40);   // PERF-IO-0: the census over the whole render (R2, default off)
         runner.stop();
         return 0;
     }
