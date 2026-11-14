@@ -32,6 +32,7 @@ public:
     };
 
 private:
+    juce::ComponentBoundsConstrainer m_constrainer;   // the host checks sizes through it: aspect ratio of the panel
     void timerCallback() override;
     void runInput();                        // the panel's input pass (no drawing)
     void showTab(int t);
