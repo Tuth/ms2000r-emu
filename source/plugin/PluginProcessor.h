@@ -91,6 +91,7 @@ private:
     void timerCallback() override;           // SYX-1: drives m_syx (message thread)
     MS2000::SyxTool m_syx;
     std::atomic<uint64_t> m_frames{ 0 };
+    std::atomic<uint64_t> m_machineStartFrame{ 0 };
     std::atomic<uint64_t> m_blocks{ 0 };                 // HOSTDIAG-1: processBlock calls (incl. the silent ones)
     int m_hostDiagTick = 0;
     // HOSTDIAG-1: MIDI OUT seen by the host, recorded on the audio thread, printed by the timer (no OutputDebugString
@@ -112,6 +113,11 @@ private:
     void stopMachine();
     void applyPanel();                       // knobs + input stage + DAC into a running machine
     void clearStreams();                     // the audio/MIDI queues of a stopped machine
+    void releaseForcedSysEx();               // STATE-RECALL-2
+    void restoreProjectEditBuffer();         // message thread: load the saved live program after firmware boot
+    void restoreProjectAudioInThru();        // message thread: restore the power-on-only AudioInThru option
+    void restoreProjectScreen();             // message thread: replay saved safe LCD navigation keys
+    void rememberScreenKey(unsigned col, unsigned row);
     // PWR-SW-1: the Master VR at its minimum switches the machine off (flash kept, as on the unit), turning it up
     // powers it on again - with the keys the panel holds (LATCH) down during the boot. Settings can disable it.
     bool powerSwitchOpen() const { return powerSwitch.load() && volume <= 0.001f; }
@@ -141,6 +147,29 @@ private:
     bool m_haveProjectFlash = false;
     uint32_t m_projectMask = 0;
     std::vector<uint8_t> m_projectImage;
+    std::mutex m_editBufferMx;
+    std::vector<uint8_t> m_projectEditBuffer;
+    int m_projectProgram = -1;
+    bool m_restoreEditPending = false;
+    bool m_restoreEditActive = false;
+    int  m_restoreEditTries = 0;                 // STATE-RECALL-2: unanswered attempts so far (the machine was still booting)
+    uint64_t m_restoreEditNotBefore = 0;         // host frame of the next attempt
+    std::mutex m_globalDataMx;
+    std::vector<uint8_t> m_projectGlobalData;
+    // STATE-RECALL-2: GLOBAL "SystemEx" filter (TABLE 6 byte 16 bit 7) is switched on for the recall's own data
+    // dump while the project has it off, and put back afterwards. Guarded by m_globalDataMx.
+    bool m_sysexForced = false;
+    bool m_projectAudioInThru = false;
+    size_t m_restoreAudioInThruIndex = 0;
+    bool m_restoreAudioInThruPending = false;
+    bool m_restoreAudioInThruDown = false;
+    int m_restoreAudioInThruDelay = 0;
+    std::mutex m_screenMx;
+    std::vector<uint8_t> m_screenKeys;        // column,row pairs from the current program's main screen
+    size_t m_restoreScreenIndex = 0;
+    bool m_restoreScreenPending = false;
+    bool m_restoreScreenDown = false;
+    int m_restoreScreenDelay = 0;
 
     // 48 kHz (the DSP's fs) -> host rate
     std::vector<float> m_srcL, m_srcR;      // rendered, not yet consumed source frames

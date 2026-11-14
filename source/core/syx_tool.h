@@ -72,19 +72,20 @@ public:
             i = j + 1;
         }
         if (m_msgs.empty()) { m_status = "No MS2000 SysEx in " + path; return false; }
-        m_name = baseName(path); m_next = 0; m_skipped = skipped;
+        m_name = baseName(path); m_next = 0; m_skipped = skipped; m_program = -1;
         begin(Import);
         return true;
     }
 
     // LIBRARY-1: one program (254 bytes, TABLE 1) into the EDIT BUFFER as CURRENT PROGRAM DATA DUMP (40) - the
     // machine's memory is not touched; WRITE on the panel stores it like any edit.
-    bool startProgram(const std::vector<uint8_t>& prog, const std::string& name)
+    bool startProgram(const std::vector<uint8_t>& prog, const std::string& name, int program = -1)
     {
         if (busy() || prog.size() != 254) return false;
         std::vector<uint8_t> m = { 0xF0, 0x42, 0x30, 0x58, 0x40 };
         const auto enc = encode7(prog); m.insert(m.end(), enc.begin(), enc.end()); m.push_back(0xF7);
         m_msgs.assign(1, m); m_name = name; m_next = 0; m_skipped = 0;
+        m_program = program >= 0 && program < 128 ? program : -1;
         begin(Import);
         return true;
     }
@@ -145,7 +146,7 @@ public:
     bool startExport(const std::string& path)
     {
         if (busy()) return false;
-        m_exportPath = path; m_name = baseName(path);
+        m_exportPath = path; m_name = baseName(path); m_program = -1;
         begin(Export);
         return true;
     }
@@ -203,6 +204,10 @@ private:
     }
     void sendNext()
     {
+        if (m_program >= 0) {
+            send({ uint8_t(0xC0 | m_ch), uint8_t(m_program) });
+            m_program = -1;
+        }
         auto m = m_msgs[m_next++];
         m[2] = uint8_t(0x30 | m_ch);
         m_expect = double(m.size()) * 10.0 / 31250.0;                // the line time
@@ -224,6 +229,7 @@ private:
     Mode m_mode = Import; St m_st = Idle;
     std::vector<std::vector<uint8_t>> m_msgs; size_t m_next = 0, m_skipped = 0;
     uint8_t m_ch = 0;
+    int m_program = -1;
     double m_t0 = 0, m_deadline = 0, m_expect = 0;
     std::string m_status, m_name, m_exportPath;
 };

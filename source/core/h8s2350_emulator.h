@@ -1862,6 +1862,8 @@ public:
     // every hit as (buffer, offset, CPU address) and the 254 bytes from there (one TABLE 1 program).
     // KNOB-FOLLOW: host-side read of the external memory (the DRAM image) - no bus cycle, no side effect
     uint8_t peekExternal(uint32_t addr) const { return addr < m_external_memory.size() ? m_external_memory[addr] : uint8_t(0); }
+    // STATE-RECALL-2: host-side write of one byte of the external memory image (the plugin's project recall only).
+    void pokeExternal(uint32_t addr, uint8_t v) { if (addr < m_external_memory.size()) m_external_memory[addr] = v; }
     void debugFindBytes(const std::string& needle) {
         auto scan = [&](const std::vector<uint8_t>& v, const char* nm, uint32_t base) {
             for (size_t i = 0; i + needle.size() <= v.size(); ++i) {
