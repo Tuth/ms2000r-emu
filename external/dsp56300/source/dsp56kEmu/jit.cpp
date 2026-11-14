@@ -1,6 +1,8 @@
 #include "jit.h"
 
+#if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 #include <thread>
 #include <functional>
 

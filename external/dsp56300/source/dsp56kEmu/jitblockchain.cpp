@@ -1,7 +1,9 @@
 #include "jitblockchain.h"
 
 #include <atomic>
+#if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 #include <thread>
 #include <functional>
 

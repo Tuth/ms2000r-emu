@@ -11,3 +11,8 @@
 #if defined(__aarch64__) || defined(__ARM_ARCH_8) || defined(_M_ARM64)
 #	define HAVE_ARM64
 #endif
+
+// ARM64-1: the MSVC intrinsic used by the debug prints, for GCC and Clang
+#if !defined(_MSC_VER)
+#	define _ReturnAddress() __builtin_return_address(0)
+#endif

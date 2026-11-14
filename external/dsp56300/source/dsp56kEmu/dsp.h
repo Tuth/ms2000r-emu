@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <cstdio>
+#if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 
 #include "disasm.h"
 #include "dspconfig.h"

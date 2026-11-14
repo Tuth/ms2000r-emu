@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <vector>
 #include <cstdio>
+#if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 
 #include "jitasmjithelpers.h"
 #include "jittypes.h"
@@ -52,6 +54,8 @@ namespace dsp56k
 
 			// 2026-10-13 hunt: hexdump the generated execUntilCycles dispatch - the ASM reads
 			// &funcRecreate from a cell the C++ reads as the block func; decode the real encoding.
+			// not generated on every target (arm64: null) - nothing to dump then
+			if(m_funcExecUntilCycles)
 			{
 				const auto* p = reinterpret_cast<const unsigned char*>(m_funcExecUntilCycles);
 				std::fprintf(stderr, "[TRAMP] execUntilCycles bytes:");
