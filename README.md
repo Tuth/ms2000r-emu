@@ -99,11 +99,19 @@ The standalone builds headless with GCC 13 or Clang (no GUI, no plugin): CMake 3
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target ms2000_emulator
 cd <folder with the ROMs> && <repo>/build/ms2000_emulator --headless --selftest-full
-MS2K_MIDIIN="2:C008;2.3:903C64;3.8:803C00" <repo>/build/ms2000_emulator --headless --quiet-boot --duration 6 --render-test out.wav
+MS2K_MODEL=R MS2K_MIDIIN="4:C008;4.3:903C64;5.8:803C00" <repo>/build/ms2000_emulator --headless --quiet-boot --duration 8 --render-test out.wav
 ```
 
 `MS2K_MIDIIN` schedules MIDI IN bytes at MCU seconds (`t:hex;t:hex`); `--render-test` writes the DSP's frames
 as a 32-bit WAV. `ctest` in the build folder runs the test suite.
+
+Two things to know about headless runs:
+- **Send nothing before about 3 s.** The firmware boots muted for about 3 s and does not act on MIDI it receives
+  before then, so a note scheduled earlier gives a silent WAV. Start at 4 s, as above.
+- **`MS2K_MODEL=R`** sets the rack strap (port pin PA5 low, the MS2000R board). The plugin sets it itself; the
+  standalone does not. The flash image is the same for both models: without the variable the firmware runs as the
+  keyboard MS2000 (PA5 high), which also plays, but it reads the two wheel channels the rack has not got. Set
+  `MS2K_MODEL=R` to match the plugin and the reference renders.
 
 ## Build (macOS)
 
@@ -131,8 +139,7 @@ cd <folder with the ROMs> && <repo>/build.nosync/ms2000_emulator --headless --se
 
 `--play` runs the machine on the default audio output without the panel (`--audio-device <name>` picks another,
 `--volume 0..1` is the VOLUME pot, default 0.7) until Ctrl+C; every panel pot stands at its centre. The firmware
-boots in about 3 s, muted - a note sent before that is not heard (the `MS2K_MIDIIN` example above plays during the
-boot; use `4.0:903C64;6.0:803C00` with `--duration 8`). AUDIO IN 1/2 (vocoder, OSC1 AUDIO IN) are chosen in the GUI: an
+boots in about 3 s, muted - a note sent before that is not heard. AUDIO IN 1/2 (vocoder, OSC1 AUDIO IN) are chosen in the GUI: an
 interface with more than two inputs is listed as stereo pairs ("IN 3-4"), and macOS asks once for the microphone
 permission.
 `-DCMAKE_OSX_ARCHITECTURES=x86_64` builds the x64 version, which runs under Rosetta 2.
