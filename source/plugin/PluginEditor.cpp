@@ -244,6 +244,11 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
     setResizable(true, true);
     setResizeLimits(700, 380, 3840, 2160);
     setSize(w, int(std::lround(w * VPanel::kH / VPanel::kW)) + kTabH);
+    // The host checks a size request through this constrainer (JUCE's VST3 wrapper: fixed aspect ratio only).
+    // resized() keeps the ratio equal to the current size's, so it follows the panel at every width.
+    m_constrainer.setMinimumSize(700, 380);
+    m_constrainer.setMaximumSize(3840, 2160);
+    setConstrainer(&m_constrainer);
     showTab(m_proc.editorTab >= 0 && m_proc.editorTab <= 2 ? m_proc.editorTab : 0);
     if (const char* e = std::getenv("MS2K_EDITORSHOT"); e && *e) { m_shotPath = e; m_testTick = 0; showTab(0); }
     if (const char* e = std::getenv("MS2K_EDITORTEST"); e && *e) m_testMode = e;
@@ -253,6 +258,7 @@ Ms2kEditor::Ms2kEditor(Ms2kProcessor& p) : AudioProcessorEditor(p), m_proc(p)
 
 Ms2kEditor::~Ms2kEditor()
 {
+    setConstrainer(nullptr);   // the member constrainer goes before the base class does
     stopTimer();
     if (getWidth() >= 700) { m_proc.editorWDefault = getWidth(); m_proc.saveGlobalSettings(); }   // UI-SIZE-1
     if (m_demoPhase) { m_proc.setSwitch(3, 6, false); m_proc.setSwitch(4, 0, false); m_demoPhase = 0; }
@@ -319,6 +325,13 @@ void Ms2kEditor::resized()
     r.removeFromTop(16);
     m_help.setBounds(r.removeFromTop(110));
     m_status.setBounds(r.removeFromTop(48));
+    // The panel's shape at this width: the window's height follows (the tab row adds kTabH). The ratio the host
+    // checks is set from the same numbers, so a size request is corrected to it.
+    if (m_tab == 0) {
+        const int wantH = int(std::lround(getWidth() * VPanel::kH / VPanel::kW)) + kTabH;
+        m_constrainer.setFixedAspectRatio(double(getWidth()) / double(wantH));
+        if (std::abs(getHeight() - wantH) > 1) { setSize(getWidth(), wantH); return; }
+    }
     m_proc.editorW = getWidth();
     m_dirty = true;
 }
