@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <cstdio>
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 
 #include "disasm.h"
 #include "dspconfig.h"
@@ -870,7 +872,7 @@ namespace dsp56k
 				// Sixteen-bit Arithmetic mode (FM 3.5.1.2): the scaled and limited 16-bit word goes to bus
 				// bits 15..0, bus bits 23..16 carry its sign extension. Limiting triggers exactly when the
 				// value does not fit into 48 bits, i.e. when EXT is not the sign extension of bit 47.
-				if( test < (-140737488355328ll << g_aluShift) )	// ff 8000 0000 0000
+				if( test < -(140737488355328ll << g_aluShift) )	// ff 8000 0000 0000
 				{
 					sr_set( CCR_L );
 					_dst = 0xff8000;
@@ -888,7 +890,7 @@ namespace dsp56k
 				return;
 			}
 
-			if( test < (-140737488355328ll << g_aluShift) )	// ff 800000 000000
+			if( test < -(140737488355328ll << g_aluShift) )	// ff 800000 000000
 			{
 				sr_set( CCR_L );
 				_dst = 0x800000;
@@ -1121,7 +1123,7 @@ namespace dsp56k
 		{
 			scale(_src);
 			const int64_t test = _src.var;
-			if(test < (-140737488355328ll << g_aluShift))
+			if(test < -(140737488355328ll << g_aluShift))
 			{
 				sr_set(CCR_L);
 				_x = 0xff8000;

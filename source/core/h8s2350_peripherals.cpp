@@ -32,10 +32,10 @@ namespace ADCMode {
 
 // Constructor
 H8S2350PeripheralEmulator::H8S2350PeripheralEmulator()
-    : m_clock_frequency(20000000)
+    : m_dac_output(0)
+    , m_clock_frequency(20000000)
     , m_cycle_count(0)
     , m_debug_enabled(false)
-    , m_dac_output(0)
 {
     // Initialize all arrays to zero
     m_tpu_registers.fill({});

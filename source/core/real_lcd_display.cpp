@@ -252,11 +252,11 @@ namespace MS2000
 	{
 		// This is for testing only - real LCD should be controlled by firmware
 		if (line == 0) {
-			for (int i = 0; i < 20 && i < text.length(); i++) {
+			for (std::size_t i = 0; i < 20 && i < text.length(); i++) {
 				m_dramData[i] = text[i];
 			}
 		} else if (line == 1) {
-			for (int i = 0; i < 20 && i < text.length(); i++) {
+			for (std::size_t i = 0; i < 20 && i < text.length(); i++) {
 				m_dramData[i + 20] = text[i];
 			}
 		}

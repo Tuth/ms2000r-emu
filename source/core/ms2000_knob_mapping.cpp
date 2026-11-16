@@ -137,7 +137,7 @@ void MS2000KnobMapping::setStepSeqValue(uint8_t step, uint8_t lane, uint8_t valu
 
 const KnobDefinition& MS2000KnobMapping::getKnobDefinition(uint8_t knob_id) const
 {
-    static KnobDefinition invalid_knob = {255, "INVALID", "INVALID", 64, 0, 127, false};
+    static KnobDefinition invalid_knob = {255, "INVALID", "INVALID", 64, 0, 127, false, "", "", "", ""};
     
     if (knob_id >= 35) {
         return invalid_knob;

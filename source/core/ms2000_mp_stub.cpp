@@ -474,8 +474,8 @@ void MS2000MPStub::processLCDData(uint8_t data)
               << " ('" << (char)((data >= 32 && data <= 126) ? data : '?') << "')" << std::dec << std::endl;
     
     // Write character to current cursor position
-    int line = (m_lcd.cursor_position >= 32) ? 1 : 0;
-    int pos = m_lcd.cursor_position % 32;
+    const std::size_t line = (m_lcd.cursor_position >= 32) ? 1 : 0;
+    const std::size_t pos = m_lcd.cursor_position % 32;
     
     std::cout << "[MP STUB] Writing to line " << line << " position " << pos << std::endl;
     

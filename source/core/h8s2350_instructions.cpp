@@ -4260,6 +4260,7 @@ namespace MS2000
                     emulator->halt();
                     return false;
             }
+            return false;
         } catch (const std::exception& e) {
             std::cout << "Error executing instruction: " << e.what() << std::endl;
             return false;

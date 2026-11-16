@@ -8,6 +8,15 @@ int main() {
     std::cout << "fw12.txt LCD GUI Buffer Test\n" << std::endl;
     
     LcdGuiBuffer gui;
+
+    // Power-on DDRAM must be blank, not custom character zero.
+    auto initialSnapshot = gui.snapshot();
+    if (std::string(initialSnapshot.line0, 16) != std::string(16, ' ') ||
+        std::string(initialSnapshot.line1, 16) != std::string(16, ' ') ||
+        initialSnapshot.displayOn) {
+        std::cout << "\n❌ LCD power-on state test: FAILED!" << std::endl;
+        return 1;
+    }
     
     // Test LCD initialization sequence
     std::cout << "Testing LCD initialization sequence...\n" << std::endl;

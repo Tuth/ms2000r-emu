@@ -47,17 +47,17 @@ struct AudioOutput::PlatformData {
 AudioOutput::AudioOutput() 
     : m_initialized(false)
     , m_playing(false)
+    , m_threadRunning(false)
     , m_latency(0)
     , m_underruns(0)
     , m_overruns(0)
     , m_cpuUsage(0.0f)
     , m_masterVolume(1.0f)
+    , m_platformData(std::make_unique<PlatformData>())
     , m_sampleRate(44100)
     , m_bufferSize(512)
     , m_channels(2)
-    , m_bitsPerSample(16)
-    , m_threadRunning(false)
-    , m_platformData(std::make_unique<PlatformData>()) {
+    , m_bitsPerSample(16) {
 }
 
 AudioOutput::~AudioOutput() {
@@ -568,8 +568,8 @@ MS2000AudioInterface::MS2000AudioInterface()
     , m_audioLevel(0.0f)
     , m_frameCount(0)
     , m_threadRunning(false)
-    , m_frameRate(60)
-    , m_lastFrame(std::chrono::steady_clock::now()) {
+    , m_lastFrame(std::chrono::steady_clock::now())
+    , m_frameRate(60) {
     
     m_voices.resize(m_max_voices);
     m_audioBuffer.resize(1024 * 2); // Stereo buffer

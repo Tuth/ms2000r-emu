@@ -227,8 +227,10 @@ void ZoneAllocator::reset(Zone* zone) noexcept {
     block = next;
   }
 
-  // Zero the entire class and initialize to the given `zone`.
-  memset(this, 0, sizeof(*this));
+  // Reset allocator state and attach the given zone.
+  for (Slot*& slot : _slots)
+    slot = nullptr;
+  _dynamicBlocks = nullptr;
   _zone = zone;
 }
 

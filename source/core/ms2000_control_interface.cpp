@@ -15,9 +15,9 @@ MS2000ControlInterface::MS2000ControlInterface()
     : m_h8s(nullptr)
     , m_dsp(nullptr)
     , m_initialized(false)
+    , m_lastUpdate(std::chrono::steady_clock::now())
     , m_updateRate(60.0f)
-    , m_running(false)
-    , m_lastUpdate(std::chrono::steady_clock::now()) {
+    , m_running(false) {
     
     // Initialize hardware state
     m_hardwareState = HardwareState();

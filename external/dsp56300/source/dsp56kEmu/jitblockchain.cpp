@@ -1,7 +1,9 @@
 #include "jitblockchain.h"
 
 #include <atomic>
+#ifdef _MSC_VER
 #include <intrin.h>
+#endif
 #include <thread>
 #include <functional>
 
@@ -55,8 +57,8 @@ namespace dsp56k
 		// ((numBlocks+1) * blockBytes, a pagefile-backed section). This print makes the
 		// per-chain table anatomy visible: entry size, MMU active or fallback, and the
 		// theoretical table bytes. Measured appetite: 4+ GB commit during boot, warden-killed.
-		std::fprintf(stderr, "[JIT-CHAIN] created. pSize=0x%zX sizeof(cacheEntry)=%zu B mmu(cache)=%d mmu(funcs)=%d tableBytes(cache)=%llu tableBytes(funcs)=%llu\n",
-			pSize, sizeof(JitCacheEntry),
+		std::fprintf(stderr, "[JIT-CHAIN] created. pSize=0x%X sizeof(cacheEntry)=%zu B mmu(cache)=%d mmu(funcs)=%d tableBytes(cache)=%llu tableBytes(funcs)=%llu\n",
+			static_cast<unsigned>(pSize), sizeof(JitCacheEntry),
 			m_jitCache.usesMMU() ? 1 : 0, m_jitFuncs.usesMMU() ? 1 : 0,
 			static_cast<unsigned long long>(pSize) * static_cast<unsigned long long>(sizeof(JitCacheEntry)),
 			static_cast<unsigned long long>(pSize) * static_cast<unsigned long long>(sizeof(TJitFunc)));

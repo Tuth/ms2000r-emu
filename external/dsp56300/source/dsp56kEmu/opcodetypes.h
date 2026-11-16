@@ -8,7 +8,7 @@ namespace dsp56k
 		Field_aaa,			// 7-bit Sign Extended Short Displacement Address
 		Field_aaaa,			// Signed PC-Relative Short Displacement
 		Field_aaaaa,		// Signed PC-Relative Short Displacement LSB, appears as aaaa0aaaaa
-		Field_aaaaaa,		// Absolute Address [0–63]
+		Field_aaaaaa,		// Absolute Address [0..63]
 		Field_aaaaaaaaaaaa,	// Short Jump Address
 		Field_bbbbb,		// Bit number
 		Field_CCCC,			// Condition Code
@@ -32,7 +32,7 @@ namespace dsp56k
 		Field_ggg,			// Data ALU Operands Encoding 3
 		Field_hhhh,			// Immediate Short Data, 4 MSB bits to form a 12 bit value as hhhhiiiiiiii [0-4095]
 		Field_i,			// Bit value, 0 or 1 to be placed in the least significant bit of Y:<ea>
-		Field_iiiii,		// 5-bit unsigned integer [0–16] denoting the shift amount
+		Field_iiiii,		// 5-bit unsigned integer [0ï¿½16] denoting the shift amount
 		Field_iiiiii,		// 6-bit Immediate Short Data
 		Field_iiiiiiii,		// 8-bit Immediate Short Data
 		Field_J,			// Data ALU Source Operands Encoding
@@ -41,19 +41,19 @@ namespace dsp56k
 		Field_k,			// Data ALU Multiply Sign Encoding
 		Field_L,			// Two Data ALU registers
 		Field_LL,			// Two Data ALU registers
-		Field_mm,			// mmrr 4-bit Y Effective Address (R4–R7 or R0–R3)
+		Field_mm,			// mmrr 4-bit Y Effective Address (R4ï¿½R7 or R0ï¿½R3)
 		Field_MM,			// Effective Addressing Mode Encoding 4
 		Field_MMM,			// Effective Addressing Mode Encoding 2/3
-		Field_pppppp,		// I/O Short Address [64 addresses: $FFFFC0–$FFFFFF]
+		Field_pppppp,		// I/O Short Address [64 addresses: $FFFFC0ï¿½$FFFFFF]
 		Field_qq,			// Data ALU Multiply Operands Encoding 3
 		Field_qqq,			// Data ALU Operands Encoding 3
-		Field_q,			// I/O Short Address [64 addresses: $FFFF80–$FFFFBF]
-		Field_qqqqq,		// I/O Short Address [64 addresses: $FFFF80–$FFFFBF]
-		Field_qqqqqq,		// I/O Short Address [64 addresses: $FFFF80–$FFFFBF]
+		Field_q,			// I/O Short Address [64 addresses: $FFFF80ï¿½$FFFFBF]
+		Field_qqqqq,		// I/O Short Address [64 addresses: $FFFF80ï¿½$FFFFBF]
+		Field_qqqqqq,		// I/O Short Address [64 addresses: $FFFF80ï¿½$FFFFBF]
 		Field_QQ,			// Data ALU Multiply Operands Encoding 2
 		Field_QQQ,			// Data ALU Multiply Operands Encoding 1
 		Field_QQQQ,			// Data ALU Multiply Operands Encoding 4
-		Field_rr,			// mmrr 4-bit Y Effective Address (R4–R7 or R0–R3)
+		Field_rr,			// mmrr 4-bit Y Effective Address (R4ï¿½R7 or R0ï¿½R3)
 		Field_RRR,			// Effective Addressing Mode Encoding 2/3/4
 		Field_s,			// Signed/Unsigned Partial Encoding 2 (su = 0, uu = 1)
 		Field_sss,			// Control register [X0,X1,Y0,Y1,A1,B1]
@@ -61,8 +61,8 @@ namespace dsp56k
 		Field_sssss,		// Immediate operand
 		Field_S,			// Space (X or Y memory)
 		Field_SSS,			// Data ALU Operands Encoding 3
-		Field_ttt,			// Source address register [R0–R7]
-		Field_TTT,			// Destination Address register [R0–R7]
+		Field_ttt,			// Source address register [R0ï¿½R7]
+		Field_TTT,			// Destination Address register [R0ï¿½R7]
 		Field_w,			// Y move Operation Control
 		Field_W,			// Write Control Encoding
 

@@ -4,6 +4,8 @@
 
 namespace dsp56k
 {
+	class Jit;
+
 	struct DspRegs
 	{
 		// accumulator
@@ -41,5 +43,7 @@ namespace dsp56k
 		TReg24 vba;						// vector base address
 	
 		TReg24 ep;						// stack extension pointer register
+
+		Jit* jit = nullptr;
 	};	
 }

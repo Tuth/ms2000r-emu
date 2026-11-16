@@ -3,7 +3,11 @@
 #include <cstdint>
 #include <vector>
 #include <cstdio>
+#ifdef _MSC_VER
 #include <intrin.h>
+#else
+#define _ReturnAddress() __builtin_return_address(0)
+#endif
 
 #include "jitasmjithelpers.h"
 #include "jittypes.h"
@@ -54,10 +58,13 @@ namespace dsp56k
 			// &funcRecreate from a cell the C++ reads as the block func; decode the real encoding.
 			{
 				const auto* p = reinterpret_cast<const unsigned char*>(m_funcExecUntilCycles);
-				std::fprintf(stderr, "[TRAMP] execUntilCycles bytes:");
-				for (size_t i = 0; i < 192; ++i)
-					std::fprintf(stderr, "%02X", p[i]);
-				std::fprintf(stderr, "\n");
+				if (p != nullptr)
+				{
+					std::fprintf(stderr, "[TRAMP] execUntilCycles bytes:");
+					for (size_t i = 0; i < 192; ++i)
+						std::fprintf(stderr, "%02X", p[i]);
+					std::fprintf(stderr, "\n");
+				}
 			}
 		}
 

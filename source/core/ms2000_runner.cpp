@@ -124,6 +124,8 @@ bool Ms2kRunner::init() {
         return true;
     }
 
+    g_lcdGui.reset();
+
     // fw21.txt: Install crash handlers first
     InstallCrashHandlers(m_cfg.crashDumpsDir.c_str());
     
@@ -449,8 +451,8 @@ bool Ms2kRunner::tickHousekeeping() {
         // Copy LCD content to display buffer
         std::memcpy(m_lcdBuffer[0], l0.c_str(), std::min<size_t>(16, l0.length()));
         std::memcpy(m_lcdBuffer[1], l1.c_str(), std::min<size_t>(16, l1.length()));
-        m_lcdBuffer[0][16] = '\\0';
-        m_lcdBuffer[1][16] = '\\0';
+        m_lcdBuffer[0][16] = '\0';
+        m_lcdBuffer[1][16] = '\0';
         
         // fw28.txt: Sync RealLCD content to GUI buffer for real-time display
         // Clear the GUI buffer and rewrite with current LCD content
@@ -1015,6 +1017,9 @@ void Ms2kRunner::boot_wireMailboxAndSSI() {
                 lcd_trace(false, cmd, LcdPath::GPIO);
 
                 // HD44780 command (RS=0, RW=0)
+                if (m_realLcd) {
+                    m_realLcd->exec(false, false, cmd);
+                }
                 s_lcd.on_cmd(cmd);  // Also update boot probe
 
                 // BUG48: do NOT forward to PanelMP. Its lcdCmd handler calls
@@ -1033,6 +1038,9 @@ void Ms2kRunner::boot_wireMailboxAndSSI() {
                 lcd_trace(true, data, LcdPath::GPIO);
 
                 // HD44780 data (RS=1, RW=0)
+                if (m_realLcd) {
+                    m_realLcd->exec(true, false, data);
+                }
                 s_lcd.on_data(data);  // Also update boot probe
 
                 // BUG48: same as the command path - no double trace through PanelMP.
@@ -1490,7 +1498,7 @@ void Ms2kRunner::initLcdObserver(const std::vector<std::string>& patterns, uint3
         auto rewindObserverFromVram = [&]{
             // Load the 2×16 display from DDRAM using HD44780 address mapping
             auto loadLine = [&](int row){
-                for (int i = 0; i < 16; i++){
+                for (std::size_t i = 0; i < 16; i++){
                     uint8_t addr = (row == 0) ? (0x00 + i) : (0x40 + i);
                     // Get the character from DDRAM via getText() compatibility method
                     auto line = m_realLcd->getText(row);

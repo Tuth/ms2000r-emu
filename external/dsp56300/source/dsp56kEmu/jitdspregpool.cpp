@@ -82,6 +82,8 @@ namespace dsp56k
 						discard(DspBwrite);
 					}
 					break;
+				default:
+					break;
 				}
 			}
 		}
@@ -487,6 +489,9 @@ namespace dsp56k
 		case DspY1:
 			if (isWritten(_reg))
 				return false;
+			break;
+		default:
+			break;
 		}
 		return true;
 	}
@@ -746,6 +751,8 @@ namespace dsp56k
 		case DspLA: 
 			movDspReg(_dst, r.la);
 			break;
+		default:
+			break;
 		}
 	}
 
@@ -845,6 +852,8 @@ namespace dsp56k
 		case DspLA: 
 			movDspReg(r.la, _src);
 			break;
+		default:
+			break;
 		}
 	}
 
@@ -939,6 +948,8 @@ namespace dsp56k
 			break;
 		case DspLA: 
 			movDspReg(r.la, _src);
+			break;
+		default:
 			break;
 		}
 	}
